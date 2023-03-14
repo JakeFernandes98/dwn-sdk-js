@@ -1,9 +1,8 @@
 import type { BaseMessage } from '../../core/types.js';
-import { DwnInterfaceName, DwnMethodName } from '../../core/message.js';
+import { DwnMethodName } from '../../core/message.js';
 
 export type ProtocolsConfigureDescriptor = {
-  interface : DwnInterfaceName.Protocols;
-  method: DwnMethodName.Configure;
+  method: DwnMethodName.ProtocolsConfigure;
   dateCreated: string;
   protocol: string;
   definition: ProtocolDefinition;
@@ -38,8 +37,7 @@ export type ProtocolsConfigureMessage = BaseMessage & {
 };
 
 export type ProtocolsQueryDescriptor = {
-  interface : DwnInterfaceName.Protocols,
-  method: DwnMethodName.Query;
+  method: DwnMethodName.ProtocolsQuery;
   dateCreated: string;
   filter?: {
     protocol: string;

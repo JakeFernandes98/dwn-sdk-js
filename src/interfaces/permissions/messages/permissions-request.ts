@@ -1,13 +1,14 @@
-import type { SignatureInput } from '../../../jose/jws/general/types.js';
+import type { AuthCreateOptions } from '../../../core/types.js';
 import type { PermissionConditions, PermissionScope } from '../types.js';
 import type { PermissionsRequestDescriptor, PermissionsRequestMessage } from '../types.js';
 
 import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
+import { Message } from '../../../core/message.js';
 import { v4 as uuidv4 } from 'uuid';
 import { validateAuthorizationIntegrity } from '../../../core/auth.js';
-import { DwnInterfaceName, DwnMethodName, Message } from '../../../core/message.js';
 
-type PermissionsRequestOptions = {
+type PermissionsRequestOptions = AuthCreateOptions & {
+  target: string;
   dateCreated?: string;
   conditions?: PermissionConditions;
   description: string;
@@ -15,7 +16,6 @@ type PermissionsRequestOptions = {
   grantedBy: string;
   objectId?: string;
   scope: PermissionScope;
-  authorizationSignatureInput: SignatureInput;
 };
 
 export class PermissionsRequest extends Message {
@@ -37,20 +37,19 @@ export class PermissionsRequest extends Message {
     const mergedConditions = { ...DEFAULT_CONDITIONS, ...providedConditions };
 
     const descriptor: PermissionsRequestDescriptor = {
-      interface   : DwnInterfaceName.Permissions,
-      method      : DwnMethodName.Request,
       dateCreated : options.dateCreated ?? getCurrentTimeInHighPrecision(),
       conditions  : mergedConditions,
       description : options.description,
       grantedTo   : options.grantedTo,
       grantedBy   : options.grantedBy,
+      method      : 'PermissionsRequest',
       objectId    : options.objectId ? options.objectId : uuidv4(),
       scope       : options.scope,
     };
 
     Message.validateJsonSchema({ descriptor, authorization: { } });
 
-    const auth = await Message.signAsAuthorization(descriptor, options.authorizationSignatureInput);
+    const auth = await Message.signAsAuthorization(options.target, descriptor, options.signatureInput);
     const message: PermissionsRequestMessage = { descriptor, authorization: auth };
 
     return new PermissionsRequest(message);

@@ -1,12 +1,11 @@
-import type { SignatureInput } from '../../../jose/jws/general/types.js';
-import type { Filter, RangeFilter } from '../../../core/types.js';
-import type { RecordsQueryDescriptor, RecordsQueryFilter, RecordsQueryMessage } from '../types.js';
+import type { AuthCreateOptions } from '../../../core/types.js';
+import type { RecordsQueryDescriptor, RecordsQueryMessage } from '../types.js';
 
+import { DwnMethodName } from '../../../core/message.js';
 import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
 import { Message } from '../../../core/message.js';
 import { removeUndefinedProperties } from '../../../utils/object.js';
 import { validateAuthorizationIntegrity } from '../../../core/auth.js';
-import { DwnInterfaceName, DwnMethodName } from '../../../core/message.js';
 
 export enum DateSort {
   CreatedAscending = 'createdAscending',
@@ -15,11 +14,19 @@ export enum DateSort {
   PublishedDescending = 'publishedDescending'
 }
 
-export type RecordsQueryOptions = {
+export type RecordsQueryOptions = AuthCreateOptions & {
+  target: string;
   dateCreated?: string;
-  filter: RecordsQueryFilter;
+  filter: {
+    recipient?: string;
+    protocol?: string;
+    contextId?: string;
+    schema?: string;
+    recordId?: string;
+    parentId?: string;
+    dataFormat?: string;
+  },
   dateSort?: DateSort;
-  authorizationSignatureInput: SignatureInput;
 };
 
 export class RecordsQuery extends Message {
@@ -36,8 +43,7 @@ export class RecordsQuery extends Message {
 
   public static async create(options: RecordsQueryOptions): Promise<RecordsQuery> {
     const descriptor: RecordsQueryDescriptor = {
-      interface   : DwnInterfaceName.Records,
-      method      : DwnMethodName.Query,
+      method      : DwnMethodName.RecordsQuery,
       dateCreated : options.dateCreated ?? getCurrentTimeInHighPrecision(),
       filter      : options.filter,
       dateSort    : options.dateSort
@@ -47,17 +53,17 @@ export class RecordsQuery extends Message {
     // Error: `undefined` is not supported by the IPLD Data Model and cannot be encoded
     removeUndefinedProperties(descriptor);
 
-    const authorization = await Message.signAsAuthorization(descriptor, options.authorizationSignatureInput);
-    const message = { descriptor, authorization };
+    Message.validateJsonSchema({ descriptor, authorization: { } });
 
-    Message.validateJsonSchema(message);
+    const authorization = await Message.signAsAuthorization(options.target, descriptor, options.signatureInput);
+    const message = { descriptor, authorization };
 
     return new RecordsQuery(message);
   }
 
-  public async authorize(tenant: string): Promise<void> {
+  public async authorize(): Promise<void> {
     // DWN owner can do any query
-    if (this.author === tenant) {
+    if (this.author === this.target) {
       return;
     }
 
@@ -69,30 +75,5 @@ export class RecordsQuery extends Message {
         throw new Error(`${this.author} is not allowed to query records intended for another recipient: ${recipientDid}`);
       }
     }
-  }
-
-  public static convertFilter(filter: RecordsQueryFilter): Filter {
-    const result: Filter = { };
-    for (const key in filter) {
-      switch (key) {
-      case 'dateCreated':
-        var rangeFilter: RangeFilter = {
-          gte : filter.dateCreated.from,
-          lt  : filter.dateCreated.to
-        };
-        if (rangeFilter.gte === undefined) {
-          delete rangeFilter.gte;
-        }
-        if (rangeFilter.lt === undefined) {
-          delete rangeFilter.lt;
-        }
-        result.dateCreated = rangeFilter;
-        break;
-      default:
-        result[key] = filter[key];
-        break;
-      }
-    }
-    return result;
   }
 }

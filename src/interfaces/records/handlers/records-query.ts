@@ -1,145 +1,150 @@
 import type { MethodHandler } from '../../types.js';
-import type { BaseMessage, QueryResultEntry } from '../../../core/types.js';
 import type { RecordsQueryMessage, RecordsWriteMessage } from '../types.js';
 
 import { authenticate } from '../../../core/auth.js';
+import { BaseMessage } from '../../../core/types.js';
+import { DwnMethodName } from '../../../core/message.js';
 import { lexicographicalCompare } from '../../../utils/string.js';
 import { MessageReply } from '../../../core/message-reply.js';
-import { StorageController } from '../../../store/storage-controller.js';
-
-import { DataStore, DidResolver, MessageStore } from '../../../index.js';
+import { MessageStore } from '../../../store/message-store.js';
+import { removeUndefinedProperties } from '../../../utils/object.js';
 import { DateSort, RecordsQuery } from '../messages/records-query.js';
-import { DwnInterfaceName, DwnMethodName } from '../../../core/message.js';
 
-export class RecordsQueryHandler implements MethodHandler {
-
-  constructor(private didResolver: DidResolver, private messageStore: MessageStore,private dataStore: DataStore) { }
-
-  public async handle({
-    tenant,
-    message
-  }): Promise<MessageReply> {
-    let recordsQuery: RecordsQuery;
-    try {
-      recordsQuery = await RecordsQuery.parse(message as RecordsQueryMessage);
-    } catch (e) {
-      return new MessageReply({
-        status: { code: 400, detail: e.message }
-      });
-    }
-
-    try {
-      await authenticate(message.authorization, this.didResolver);
-      await recordsQuery.authorize(tenant);
-    } catch (e) {
-      return new MessageReply({
-        status: { code: 401, detail: e.message }
-      });
-    }
-
-    let records: BaseMessage[];
-    if (recordsQuery.author === tenant) {
-      records = await this.fetchRecordsAsOwner(tenant, recordsQuery);
-    } else {
-      records = await this.fetchRecordsAsNonOwner(tenant, recordsQuery);
-    }
-
-    // sort if `dataSort` is specified
-    if (recordsQuery.message.descriptor.dateSort) {
-      records = await sortRecords(records, recordsQuery.message.descriptor.dateSort);
-    }
-
-    // strip away `authorization` property for each record before responding
-    const entries: QueryResultEntry[] = [];
-    for (const record of records) {
-      const { authorization: _, ...objectWithRemainingProperties } = record; // a trick to stripping away `authorization`
-      entries.push(objectWithRemainingProperties);
-    }
-
+export const handleRecordsQuery: MethodHandler = async (
+  message,
+  messageStore,
+  didResolver
+): Promise<MessageReply> => {
+  let recordsQuery: RecordsQuery;
+  try {
+    recordsQuery = await RecordsQuery.parse(message as RecordsQueryMessage);
+  } catch (e) {
     return new MessageReply({
-      status: { code: 200, detail: 'OK' },
-      entries
+      status: { code: 400, detail: e.message }
     });
   }
 
-  /**
-   * Fetches the records as the owner of the DWN with no additional filtering.
-   */
-  private async fetchRecordsAsOwner(tenant: string, recordsQuery: RecordsQuery): Promise<BaseMessage[]> {
-    // fetch all published records matching the query
-    const filter = {
-      ...RecordsQuery.convertFilter(recordsQuery.message.descriptor.filter),
-      interface         : DwnInterfaceName.Records,
-      method            : DwnMethodName.Write,
-      isLatestBaseState : true
-    };
-    const records = await StorageController.query(this.messageStore, this.dataStore, tenant, filter);
-    return records;
+  try {
+    await authenticate(message.authorization, didResolver);
+    await recordsQuery.authorize();
+  } catch (e) {
+    return new MessageReply({
+      status: { code: 401, detail: e.message }
+    });
   }
 
-  /**
-   * Fetches the records as a non-owner, return only:
-   * 1. published records; and
-   * 2. unpublished records intended for the requester (where `recipient` is the requester)
-   */
-  private async fetchRecordsAsNonOwner(tenant: string, recordsQuery: RecordsQuery)
-    : Promise<BaseMessage[]> {
-    const publishedRecords = await this.fetchPublishedRecords(tenant, recordsQuery);
-    const unpublishedRecordsForRequester = await this.fetchUnpublishedRecordsForRequester(tenant, recordsQuery);
-    const unpublishedRecordsByRequester = await this.fetchUnpublishedRecordsByRequester(tenant, recordsQuery);
-    const records = [...publishedRecords, ...unpublishedRecordsForRequester, ...unpublishedRecordsByRequester];
-    return records;
+  let records: BaseMessage[];
+  if (recordsQuery.author === recordsQuery.target) {
+    records = await fetchRecordsAsOwner(recordsQuery, messageStore);
+  } else {
+    records = await fetchRecordsAsNonOwner(recordsQuery, messageStore);
   }
 
-  /**
-   * Fetches only published records.
-   */
-  private async fetchPublishedRecords(tenant: string, recordsQuery: RecordsQuery): Promise<BaseMessage[]> {
-    // fetch all published records matching the query
-    const filter = {
-      ...RecordsQuery.convertFilter(recordsQuery.message.descriptor.filter),
-      interface         : DwnInterfaceName.Records,
-      method            : DwnMethodName.Write,
-      published         : true,
-      isLatestBaseState : true
-    };
-    const publishedRecords = await StorageController.query(this.messageStore, this.dataStore, tenant, filter);
-    return publishedRecords;
+  // sort if `dataSort` is specified
+  if (recordsQuery.message.descriptor.dateSort) {
+    records = await sortRecords(records, recordsQuery.message.descriptor.dateSort);
   }
 
-  /**
-   * Fetches only unpublished records that are intended for the requester (where `recipient` is the requester).
-   */
-  private async fetchUnpublishedRecordsForRequester(tenant: string, recordsQuery: RecordsQuery): Promise<BaseMessage[]> {
+  // strip away `authorization` property for each record before responding
+  const entries = [];
+  for (const record of records) {
+    const recordDuplicate = { ...record };
+    delete recordDuplicate.authorization;
+    entries.push(recordDuplicate);
+  }
+
+  return new MessageReply({
+    status: { code: 200, detail: 'OK' },
+    entries
+  });
+};
+/**
+ * Fetches the records as the owner of the DWN with no additional filtering.
+ */
+async function fetchRecordsAsOwner(recordsQuery: RecordsQuery, messageStore: MessageStore): Promise<BaseMessage[]> {
+  // fetch all published records matching the query
+  const includeCriteria = {
+    target            : recordsQuery.target,
+    method            : DwnMethodName.RecordsWrite,
+    isLatestBaseState : 'true',
+    ...recordsQuery.message.descriptor.filter
+  };
+  removeUndefinedProperties(includeCriteria);
+
+  const records = await messageStore.query(includeCriteria);
+  return records;
+}
+
+/**
+ * Fetches the records as a non-owner, return only:
+ * 1. published records; and
+ * 2. unpublished records intended for the requester (where `recipient` is the requester)
+ */
+async function fetchRecordsAsNonOwner(recordsQuery: RecordsQuery, messageStore: MessageStore)
+  : Promise<BaseMessage[]> {
+  const publishedRecords = await fetchPublishedRecords(recordsQuery, messageStore);
+  const unpublishedRecordsForRequester = await fetchUnpublishedRecordsForRequester(recordsQuery, messageStore);
+  const unpublishedRecordsByRequester = await fetchUnpublishedRecordsByRequester(recordsQuery, messageStore);
+  const records = [...publishedRecords, ...unpublishedRecordsForRequester, ...unpublishedRecordsByRequester];
+  return records;
+}
+
+/**
+ * Fetches only published records.
+ */
+async function fetchPublishedRecords(recordsQuery: RecordsQuery, messageStore: MessageStore): Promise<BaseMessage[]> {
+  // fetch all published records matching the query
+  const includeCriteria = {
+    target            : recordsQuery.target,
+    method            : DwnMethodName.RecordsWrite,
+    published         : 'true',
+    isLatestBaseState : 'true',
+    ...recordsQuery.message.descriptor.filter
+  };
+  removeUndefinedProperties(includeCriteria);
+
+  const publishedRecords = await messageStore.query(includeCriteria);
+  return publishedRecords;
+}
+
+/**
+ * Fetches only unpublished records that are intended for the requester (where `recipient` is the requester).
+ */
+async function fetchUnpublishedRecordsForRequester(recordsQuery: RecordsQuery, messageStore: MessageStore)
+  : Promise<BaseMessage[]> {
   // include records where recipient is requester
-    const filter = {
-      ...RecordsQuery.convertFilter(recordsQuery.message.descriptor.filter),
-      interface         : DwnInterfaceName.Records,
-      method            : DwnMethodName.Write,
-      recipient         : recordsQuery.author,
-      isLatestBaseState : true,
-      published         : false
-    };
-    const unpublishedRecordsForRequester = await StorageController.query(this.messageStore, this.dataStore, tenant, filter);
-    return unpublishedRecordsForRequester;
-  }
+  const includeCriteria = {
+    target            : recordsQuery.target,
+    recipient         : recordsQuery.author,
+    method            : DwnMethodName.RecordsWrite,
+    isLatestBaseState : 'true',
+    published         : 'false',
+    ...recordsQuery.message.descriptor.filter
+  };
+  removeUndefinedProperties(includeCriteria);
 
-  /**
-   * Fetches only unpublished records that are authored by the requester.
-   */
-  private async fetchUnpublishedRecordsByRequester(tenant: string, recordsQuery: RecordsQuery): Promise<BaseMessage[]> {
-    // include records where recipient is requester
-    const filter = {
-      ...RecordsQuery.convertFilter(recordsQuery.message.descriptor.filter),
-      author            : recordsQuery.author,
-      interface         : DwnInterfaceName.Records,
-      method            : DwnMethodName.Write,
-      isLatestBaseState : true,
-      published         : false
-    };
-    const unpublishedRecordsForRequester = await StorageController.query(this.messageStore, this.dataStore, tenant, filter);
-    return unpublishedRecordsForRequester;
-  }
+  const unpublishedRecordsForRequester = await messageStore.query(includeCriteria);
+  return unpublishedRecordsForRequester;
+}
+
+/**
+ * Fetches only unpublished records that are authored by the requester.
+ */
+async function fetchUnpublishedRecordsByRequester(recordsQuery: RecordsQuery, messageStore: MessageStore)
+  : Promise<BaseMessage[]> {
+  // include records where recipient is requester
+  const includeCriteria = {
+    target            : recordsQuery.target,
+    author            : recordsQuery.author,
+    method            : DwnMethodName.RecordsWrite,
+    isLatestBaseState : 'true',
+    published         : 'false',
+    ...recordsQuery.message.descriptor.filter
+  };
+  removeUndefinedProperties(includeCriteria);
+
+  const unpublishedRecordsForRequester = await messageStore.query(includeCriteria);
+  return unpublishedRecordsForRequester;
 }
 
 /**

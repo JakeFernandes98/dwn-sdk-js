@@ -1,18 +1,18 @@
-import type { SignatureInput } from '../../../jose/jws/general/types.js';
+import type { AuthCreateOptions } from '../../../core/types.js';
 import type { ProtocolsQueryDescriptor, ProtocolsQueryMessage } from '../types.js';
 
 import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
 import { removeUndefinedProperties } from '../../../utils/object.js';
 import { validateAuthorizationIntegrity } from '../../../core/auth.js';
 
-import { DwnInterfaceName, DwnMethodName, Message } from '../../../core/message.js';
+import { DwnMethodName, Message } from '../../../core/message.js';
 
-export type ProtocolsQueryOptions = {
+export type ProtocolsQueryOptions = AuthCreateOptions & {
+  target: string;
   dateCreated?: string;
   filter?: {
     protocol: string;
   }
-  authorizationSignatureInput: SignatureInput;
 };
 
 export class ProtocolsQuery extends Message {
@@ -30,8 +30,7 @@ export class ProtocolsQuery extends Message {
 
   public static async create(options: ProtocolsQueryOptions): Promise<ProtocolsQuery> {
     const descriptor: ProtocolsQueryDescriptor = {
-      interface   : DwnInterfaceName.Protocols,
-      method      : DwnMethodName.Query,
+      method      : DwnMethodName.ProtocolsQuery,
       dateCreated : options.dateCreated ?? getCurrentTimeInHighPrecision(),
       filter      : options.filter,
     };
@@ -42,7 +41,7 @@ export class ProtocolsQuery extends Message {
 
     Message.validateJsonSchema({ descriptor, authorization: { } });
 
-    const authorization = await Message.signAsAuthorization(descriptor, options.authorizationSignatureInput);
+    const authorization = await Message.signAsAuthorization(options.target, descriptor, options.signatureInput);
     const message = { descriptor, authorization };
 
     const protocolsQuery = new ProtocolsQuery(message);

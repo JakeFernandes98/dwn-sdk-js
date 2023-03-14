@@ -1,8 +1,6 @@
-import type { BaseMessage, Filter } from '../core/types.js';
+import type { BaseMessage } from '../core/types.js';
 
-export interface MessageStoreOptions {
-  signal?: AbortSignal;
-}
+import { CID } from 'multiformats/cid';
 
 export interface MessageStore {
   /**
@@ -19,26 +17,25 @@ export interface MessageStore {
    * adds a message to the underlying store. Uses the message's cid as the key
    * @param indexes indexes (key-value pairs) to be included as part of this put operation
    */
-  put(
-    tenant: string,
-    messageJson: BaseMessage,
-    indexes: { [key: string]: string },
-    options?: MessageStoreOptions
-  ): Promise<void>;
+  put(messageJson: BaseMessage, indexes: { [key: string]: string }): Promise<void>;
 
   /**
-   * Fetches a single message by `cid` from the underlying store.
-   * Returns `undefined` no message was found.
+   * fetches a single message by `cid` from the underlying store. Returns `undefined`
+   * if no message was found
+   * @param cid
    */
-  get(tenant: string, cid: string, options?: MessageStoreOptions): Promise<BaseMessage | undefined>;
+  get(cid: CID): Promise<BaseMessage>;
 
   /**
-   * Queries the underlying store for messages that match the provided filter.
+   * queries the underlying store for messages that match the query provided.
+   * returns an empty array if no messages are found
+   * @param criteria - "AND" criteria for what to include
    */
-  query(tenant: string, filter: Filter, options?: MessageStoreOptions ): Promise<BaseMessage[]>;
+  query(criteria: any): Promise<BaseMessage[]>;
 
   /**
-   * Deletes the message associated with the id provided.
+   * deletes the message associated to the id provided
+   * @param cid
    */
-  delete(tenant: string, cid: string, options?: MessageStoreOptions): Promise<void>;
+  delete(cid: CID): Promise<void>;
 }

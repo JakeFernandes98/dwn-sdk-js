@@ -1,16 +1,16 @@
-import type { SignatureInput } from '../../../jose/jws/general/types.js';
+import type { AuthCreateOptions } from '../../../core/types.js';
 import type { ProtocolDefinition, ProtocolsConfigureDescriptor, ProtocolsConfigureMessage } from '../types.js';
 
 import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
 import { validateAuthorizationIntegrity } from '../../../core/auth.js';
 
-import { DwnInterfaceName, DwnMethodName, Message } from '../../../core/message.js';
+import { DwnMethodName, Message } from '../../../core/message.js';
 
-export type ProtocolsConfigureOptions = {
+export type ProtocolsConfigureOptions = AuthCreateOptions & {
+  target: string;
   dateCreated? : string;
   protocol: string;
   definition : ProtocolDefinition;
-  authorizationSignatureInput: SignatureInput;
 };
 
 export class ProtocolsConfigure extends Message {
@@ -28,16 +28,15 @@ export class ProtocolsConfigure extends Message {
 
   public static async create(options: ProtocolsConfigureOptions): Promise<ProtocolsConfigure> {
     const descriptor: ProtocolsConfigureDescriptor = {
-      interface   : DwnInterfaceName.Protocols,
-      method      : DwnMethodName.Configure,
+      method      : DwnMethodName.ProtocolsConfigure,
       dateCreated : options.dateCreated ?? getCurrentTimeInHighPrecision(),
       protocol    : options.protocol,
-      definition  : options.definition // TODO: #139 - move definition out of the descriptor - https://github.com/TBD54566975/dwn-sdk-js/issues/139
+      definition  : options.definition
     };
 
     Message.validateJsonSchema({ descriptor, authorization: { } });
 
-    const authorization = await Message.signAsAuthorization(descriptor, options.authorizationSignatureInput);
+    const authorization = await Message.signAsAuthorization(options.target, descriptor, options.signatureInput);
     const message = { descriptor, authorization };
 
     const protocolsConfigure = new ProtocolsConfigure(message);

@@ -1,14 +1,16 @@
-import type { BaseMessage, Filter } from '../core/types.js';
-import type { MessageStore, MessageStoreOptions } from './message-store.js';
+import type { MessageStore } from './message-store.js';
+import type { BaseMessage, DataReferencingMessage } from '../core/types.js';
 
 import * as block from 'multiformats/block';
 import * as cbor from '@ipld/dag-cbor';
+import _ from 'lodash';
+import searchIndex from 'search-index';
 
-import { abortOr } from '../utils/abort.js';
 import { BlockstoreLevel } from './blockstore-level.js';
 import { CID } from 'multiformats/cid';
-import { createLevelDatabase } from './level-wrapper.js';
-import { IndexLevel } from './index-level.js';
+import { Encoder } from '../utils/encoder.js';
+import { exporter } from 'ipfs-unixfs-exporter';
+import { importer } from 'ipfs-unixfs-importer';
 import { sha256 } from 'multiformats/hashes/sha2';
 
 /**
@@ -17,10 +19,10 @@ import { sha256 } from 'multiformats/hashes/sha2';
  */
 export class MessageStoreLevel implements MessageStore {
   config: MessageStoreLevelConfig;
-
-  blockstore: BlockstoreLevel;
-
-  index: IndexLevel;
+  db: BlockstoreLevel;
+  // levelDB doesn't natively provide the querying capabilities needed for DWN,
+  // to accommodate, we're leveraging a level-backed inverted index.
+  index: Awaited<ReturnType<typeof searchIndex>>; // type `SearchIndex` is not exported. So we construct it indirectly from function return type
 
   /**
    * @param {MessageStoreLevelConfig} config
@@ -33,113 +35,192 @@ export class MessageStoreLevel implements MessageStore {
     this.config = {
       blockstoreLocation : 'BLOCKSTORE',
       indexLocation      : 'INDEX',
-      createLevelDatabase,
       ...config
     };
 
-    this.blockstore = new BlockstoreLevel({
-      location            : this.config.blockstoreLocation,
-      createLevelDatabase : this.config.createLevelDatabase,
-    });
-
-    this.index = new IndexLevel({
-      location            : this.config.indexLocation,
-      createLevelDatabase : this.config.createLevelDatabase,
-    });
+    this.db = new BlockstoreLevel(this.config.blockstoreLocation);
   }
 
   async open(): Promise<void> {
-    await this.blockstore.open();
-    await this.index.open();
+    if (!this.db) {
+      this.db = new BlockstoreLevel(this.config.blockstoreLocation);
+    }
+
+    await this.db.open();
+
+    // calling `searchIndex()` twice without closing its DB causes the process to hang (ie. calling this method consecutively),
+    // so check to see if the index has already been "opened" before opening it again.
+    if (!this.index) {
+      this.index = await searchIndex({ name: this.config.indexLocation });
+    }
   }
 
   async close(): Promise<void> {
-    await this.blockstore.close();
-    await this.index.close();
+    await this.db.close();
+    await this.index.INDEX.STORE.close(); // MUST close index-search DB, else `searchIndex()` triggered in a different instance will hang indefinitely
   }
 
-  async get(tenant: string, cidString: string, options?: MessageStoreOptions): Promise<BaseMessage | undefined> {
-    options?.signal?.throwIfAborted();
-
-    const partition = await abortOr(options?.signal, this.blockstore.partition(tenant));
-
-    const cid = CID.parse(cidString);
-    const bytes = await partition.get(cid, options);
+  async get(cid: CID): Promise<BaseMessage> {
+    const bytes = await this.db.get(cid);
 
     if (!bytes) {
-      return undefined;
+      return;
     }
 
-    const decodedBlock = await abortOr(options?.signal, block.decode({ bytes, codec: cbor, hasher: sha256 }));
+    const decodedBlock = await block.decode({ bytes, codec: cbor, hasher: sha256 });
 
     const messageJson = decodedBlock.value as BaseMessage;
+
+    if (!messageJson.descriptor['dataCid']) {
+      return messageJson;
+    }
+
+    // data is chunked into dag-pb unixfs blocks. re-inflate the chunks.
+    const dataReferencingMessage = decodedBlock.value as DataReferencingMessage;
+    const dataCid = CID.parse(dataReferencingMessage.descriptor.dataCid);
+
+    const dataDagRoot = await exporter(dataCid, this.db);
+    const dataBytes = new Uint8Array(dataDagRoot.size);
+    let offset = 0;
+
+    for await (const chunk of dataDagRoot.content()) {
+      dataBytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    dataReferencingMessage.encodedData = Encoder.bytesToBase64Url(dataBytes);
+
     return messageJson;
   }
 
-  async query(tenant: string, filter: Filter, options?: MessageStoreOptions): Promise<BaseMessage[]> {
-    options?.signal?.throwIfAborted();
-
+  async query(criteria: any): Promise<BaseMessage[]> {
     const messages: BaseMessage[] = [];
 
-    const resultIds = await this.index.query({ ...filter, tenant }, options);
+    // parse query into a query that is compatible with the index we're using
+    const queryTerms = MessageStoreLevel.buildIndexQueryTerms(criteria);
 
-    for (const id of resultIds) {
-      const message = await this.get(tenant, id, options);
+    const { RESULT: indexResults } = await this.index.QUERY({ AND: queryTerms });
+
+    for (const result of indexResults) {
+      const cid = CID.parse(result._id);
+      const message = await this.get(cid);
+
       messages.push(message);
     }
 
     return messages;
   }
 
-  async delete(tenant: string, cidString: string, options?: MessageStoreOptions): Promise<void> {
-    options?.signal?.throwIfAborted();
 
-    const partition = await abortOr(options?.signal, this.blockstore.partition(tenant));
-
-    // TODO: Implement data deletion in Records - https://github.com/TBD54566975/dwn-sdk-js/issues/84
-    const cid = CID.parse(cidString);
-    await partition.delete(cid, options);
-    await this.index.delete(cidString, options);
+  async delete(cid: CID): Promise<void> {
+    // TODO: Implement data deletion in Collections - https://github.com/TBD54566975/dwn-sdk-js/issues/84
+    await this.db.delete(cid);
+    await this.index.DELETE(cid.toString());
 
     return;
   }
 
-  async put(
-    tenant: string,
-    message: BaseMessage,
-    indexes: { [key: string]: string },
-    options?: MessageStoreOptions
-  ): Promise<void> {
-    options?.signal?.throwIfAborted();
+  async put(messageJson: BaseMessage, indexes: { [key: string]: string }): Promise<void> {
+    // make a shallow copy so we don't mess up the references (e.g. `encodedData`) of original message
+    const messageCopy = { ...messageJson };
 
-    const partition = await abortOr(options?.signal, this.blockstore.partition(tenant));
+    // delete `encodedData` if it exists so `messageJson` is stored without it, `encodedData` will be decoded, chunked and stored separately below
+    let encodedData = undefined;
+    if (messageCopy['encodedData'] !== undefined) {
+      const messageJsonWithEncodedData = messageCopy as unknown as DataReferencingMessage;
+      encodedData = messageJsonWithEncodedData.encodedData;
 
-    const encodedMessageBlock = await abortOr(options?.signal, block.encode({ value: message, codec: cbor, hasher: sha256 }));
+      delete messageJsonWithEncodedData.encodedData;
+    }
 
-    await partition.put(encodedMessageBlock.cid, encodedMessageBlock.bytes, options);
+    const encodedBlock = await block.encode({ value: messageCopy, codec: cbor, hasher: sha256 });
 
-    // TODO: #218 - Use tenant + record scoped IDs - https://github.com/TBD54566975/dwn-sdk-js/issues/218
-    const encodedMessageBlockCid = encodedMessageBlock.cid.toString();
+    await this.db.put(encodedBlock.cid, encodedBlock.bytes);
+
+    // if `encodedData` is present we'll decode it then chunk it and store it as unix-fs dag-pb encoded
+    if (encodedData) {
+      const content = Encoder.base64UrlToBytes(encodedData);
+      const chunk = importer([{ content }], this.db, { cidVersion: 1 });
+
+      // for some reason no-unused-vars doesn't work in for loops. it's not entirely surprising because
+      // it does seem a bit strange to iterate over something you never end up using but in this case
+      // we really don't have to access the result of `chunk` because it's just outputting every unix-fs
+      // entry that's getting written to the blockstore. the last entry contains the root cid
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      for await (const _ of chunk) { ; }
+    }
+
     const indexDocument = {
-      ...indexes,
-      tenant,
-      _id: encodedMessageBlockCid
+      _id: encodedBlock.cid.toString(),
+      ...indexes
     };
 
-    await this.index.put(indexDocument, options);
+    // tokenSplitRegex is used to tokenize values. By default, only letters and digits are indexed,
+    // overriding to include all characters, examples why we need to include more than just letters and digits:
+    // 'did:example:alice'                    - ':'
+    // '337970c4-52e0-4bd7-b606-bfc1d6fe2350' - '-'
+    // 'application/json'                     - '/'
+    await this.index.PUT([indexDocument], { tokenSplitRegex: /.+/ });
   }
 
   /**
    * deletes everything in the underlying datastore and indices.
    */
   async clear(): Promise<void> {
-    await this.blockstore.clear();
-    await this.index.clear();
+    await this.db.clear();
+    await this.index.FLUSH();
+  }
+
+  /**
+   * recursively parses a query object into a list of flattened terms that can be used to query the search
+   * index
+   * @example
+   * buildIndexQueryTerms({
+   *    ability : {
+   *      method : 'RecordsQuery',
+   *      schema : 'https://schema.org/MusicPlaylist'
+   *    }
+   * })
+   * // returns
+   * [
+        { FIELD: ['ability.method'], VALUE: 'RecordsQuery' },
+        { FIELD: ['ability.schema'], VALUE: 'https://schema.org/MusicPlaylist' }
+      ]
+   * @param query - the query to parse
+   * @param terms - internally used to collect terms
+   * @param prefix - internally used to pass parent properties into recursive calls
+   * @returns the list of terms
+   */
+  private static buildIndexQueryTerms(
+    query: any,
+    terms: SearchIndexTerm[] =[],
+    prefix: string = ''
+  ): SearchIndexTerm[] {
+    for (const property in query) {
+      const val = query[property];
+
+      if (_.isPlainObject(val)) {
+        MessageStoreLevel.buildIndexQueryTerms(val, terms, `${prefix}${property}.`);
+      } else {
+        // NOTE: using object-based expressions because we need to support filters against non-string properties
+        const term = {
+          FIELD : [`${prefix}${property}`],
+          VALUE : val
+        };
+        terms.push(term);
+      }
+    }
+
+    return terms;
   }
 }
+
+type SearchIndexTerm = {
+  FIELD: string[];
+  VALUE: any;
+};
 
 type MessageStoreLevelConfig = {
   blockstoreLocation?: string,
   indexLocation?: string,
-  createLevelDatabase?: typeof createLevelDatabase,
 };

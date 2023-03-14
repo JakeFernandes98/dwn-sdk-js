@@ -7,7 +7,7 @@ import { Did } from './did.js';
 import { ed25519 } from '../../src/jose/algorithms/signing/ed25519.js';
 import { Encoder } from '../utils/encoder.js';
 import { secp256k1 } from '../jose/algorithms/signing/secp256k1.js';
-import { KeyMaterial, PublicJwk } from '../jose/types.js';
+import { PrivateJwk, PublicJwk } from '../jose/types.js';
 
 /**
  * did:key Resolver.
@@ -106,10 +106,14 @@ export class DidKeyResolver implements DidMethodResolver {
   }
 
   /**
-   * Generates a new ed25519 public/private key pair. Creates a DID using the private key.
-   * @returns DID and its key material.
+   * generates a new ed25519 public/private key pair. Creates a DID using the private key
+   * @returns did, public key, private key
    */
-  public static async generate(): Promise<{ did: string } & KeyMaterial> {
+  public static async generate(): Promise<{
+    did: string,
+    keyId: string,
+    keyPair: { publicJwk: PublicJwk, privateJwk: PrivateJwk }
+  }> {
     const { publicJwk, privateJwk } = await ed25519.generateKeyPair();
 
     // multicodec code for Ed25519 public keys

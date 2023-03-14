@@ -1,17 +1,14 @@
 import { BaseMessage } from '../../core/types.js';
 import { DateSort } from './messages/records-query.js';
-import { GeneralJws } from '../../jose/jws/general/types.js';
-import { DwnInterfaceName, DwnMethodName } from '../../core/message.js';
+import { DwnMethodName } from '../../core/message.js';
 
 export type RecordsWriteDescriptor = {
-  interface: DwnInterfaceName.Records;
-  method: DwnMethodName.Write;
-  protocol?: string;
   recipient: string;
+  method: DwnMethodName.RecordsWrite;
+  protocol?: string;
   schema?: string;
   parentId?: string;
   dataCid: string;
-  dataSize: number;
   dateCreated: string;
   dateModified: string;
   published?: boolean;
@@ -23,7 +20,7 @@ export type RecordsWriteMessage = BaseMessage & {
   recordId: string,
   contextId?: string;
   descriptor: RecordsWriteDescriptor;
-  attestation?: GeneralJws;
+  encodedData?: string;
 };
 
 /**
@@ -37,71 +34,27 @@ export type UnsignedRecordsWriteMessage = {
 };
 
 export type RecordsQueryDescriptor = {
-  interface: DwnInterfaceName.Records;
-  method: DwnMethodName.Query;
+  method: DwnMethodName.RecordsQuery;
   dateCreated: string;
-  filter: RecordsQueryFilter;
+  filter: {
+    recipient?: string;
+    protocol?: string;
+    contextId?: string;
+    schema?: string;
+    recordId?: string;
+    parentId?: string;
+    dataFormat?: string;
+  }
   dateSort?: DateSort;
 };
 
-export type RecordsQueryFilter = {
-  attester?: string;
-  recipient?: string;
-  protocol?: string;
-  contextId?: string;
-  schema?: string;
-  recordId?: string;
-  parentId?: string;
-  dataFormat?: string;
-  dateCreated?: RangeCriterion;
-};
-
-export type RangeCriterion = {
-  /**
-   * Inclusive starting date-time.
-   */
-  from?: string;
-
-  /**
-   * Inclusive end date-time.
-   */
-  to?: string;
-};
-
-export type RecordsWriteAttestationPayload = {
-  descriptorCid: string;
-};
-
 export type RecordsWriteAuthorizationPayload = {
+  target: string;
   recordId: string;
   contextId?: string;
   descriptorCid: string;
-  attestationCid?: string;
 };
 
 export type RecordsQueryMessage = BaseMessage & {
   descriptor: RecordsQueryDescriptor;
-};
-
-export type RecordsReadMessage = {
-  authorization?: GeneralJws;
-  descriptor: RecordsReadDescriptor;
-};
-
-export type RecordsReadDescriptor = {
-  interface: DwnInterfaceName.Records;
-  method: DwnMethodName.Read;
-  recordId: string;
-  date: string;
-};
-
-export type RecordsDeleteMessage = BaseMessage & {
-  descriptor: RecordsDeleteDescriptor;
-};
-
-export type RecordsDeleteDescriptor = {
-  interface: DwnInterfaceName.Records;
-  method: DwnMethodName.Delete;
-  recordId: string;
-  dateModified: string;
 };

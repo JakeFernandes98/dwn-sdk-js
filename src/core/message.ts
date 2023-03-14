@@ -1,28 +1,21 @@
 import type { SignatureInput } from '../jose/jws/general/types.js';
-import type { BaseDecodedAuthorizationPayload, BaseMessage, Descriptor, TimestampedMessage } from './types.js';
+import type { BaseDecodedAuthorizationPayload, BaseMessage, Descriptor } from './types.js';
 
-import { computeCid } from '../utils/cid.js';
+import { CID } from 'multiformats/cid';
 import { GeneralJws } from '../jose/jws/general/types.js';
 import { GeneralJwsSigner } from '../jose/jws/general/signer.js';
-import { Jws } from '../utils/jws.js';
+import { GeneralJwsVerifier } from '../jose/jws/general/verifier.js';
+import { generateCid } from '../utils/cid.js';
 import { lexicographicalCompare } from '../utils/string.js';
-import { validateJsonSchema } from '../schema-validator.js';
-
-export enum DwnInterfaceName {
-  Hooks = 'Hooks',
-  Permissions = 'Permissions',
-  Protocols = 'Protocols',
-  Records = 'Records'
-}
+import { RecordsWriteMessage } from '../interfaces/records/types.js';
+import { validateJsonSchema } from '../validator.js';
 
 export enum DwnMethodName {
-  Configure = 'Configure',
-  Grant = 'Grant',
-  Query = 'Query',
-  Read = 'Read',
-  Request = 'Request',
-  Write = 'Write',
-  Delete = 'Delete'
+  RecordsWrite = 'RecordsWrite',
+  RecordsQuery = 'RecordsQuery',
+  HooksWrite = 'HooksWrite',
+  ProtocolsConfigure = 'ProtocolsConfigure',
+  ProtocolsQuery = 'ProtocolsQuery'
 }
 
 export abstract class Message {
@@ -31,12 +24,14 @@ export abstract class Message {
 
   // commonly used properties for extra convenience;
   readonly author: string;
+  readonly target: string;
 
   constructor(message: BaseMessage) {
     this.message = message;
-    this.authorizationPayload = Jws.decodePlainObjectPayload(message.authorization);
+    this.authorizationPayload = GeneralJwsVerifier.decodePlainObjectPayload(message.authorization);
 
     this.author = Message.getAuthor(message);
+    this.target = this.authorizationPayload.target;
   }
 
   /**
@@ -50,32 +45,33 @@ export abstract class Message {
    * Validates the given message against the corresponding JSON schema.
    * @throws {Error} if fails validation.
    */
-  public static validateJsonSchema(rawMessage: any): void {
-    const dwnInterface = rawMessage.descriptor.interface;
-    const dwnMethod = rawMessage.descriptor.method;
-    const schemaLookupKey = dwnInterface + dwnMethod;
+  public static validateJsonSchema(rawMessage: any): BaseMessage {
+    // validate throws an error if message is invalid
+    validateJsonSchema(rawMessage.descriptor.method, rawMessage);
 
-    // throws an error if message is invalid
-    validateJsonSchema(schemaLookupKey, rawMessage);
+    return rawMessage as BaseMessage;
   };
 
   /**
    * Gets the DID of the author of the given message.
    */
   public static getAuthor(message: BaseMessage): string {
-    const author = Jws.getSignerDid(message.authorization.signatures[0]);
+    const author = GeneralJwsVerifier.getDid(message.authorization.signatures[0]);
     return author;
   }
 
   /**
    * Gets the CID of the given message.
+   * NOTE: `encodedData` is ignored when computing the CID of message.
    */
-  public static async getCid(message: BaseMessage): Promise<string> {
-    // NOTE: we wrap the `computeCid()` here in case that
-    // the message will contain properties that should not be part of the CID computation
-    // and we need to strip them out (like `encodedData` that we historically had for a long time),
-    // but we can remove this method entirely if the code becomes stable and it is apparent that the wrapper is not needed
-    const cid = await computeCid(message);
+  public static async getCid(message: BaseMessage): Promise<CID> {
+    const messageCopy = { ...message };
+
+    if (messageCopy['encodedData'] !== undefined) {
+      delete (messageCopy as RecordsWriteMessage).encodedData;
+    }
+
+    const cid = await generateCid(messageCopy);
     return cid;
   }
 
@@ -116,71 +112,24 @@ export abstract class Message {
   /**
    * Signs the provided message to be used an `authorization` property. Signed payload includes the CID of the message's descriptor by default
    * along with any additional payload properties provided
+   * @param target - the logical DID where this message will be sent to
    * @param descriptor - the message to sign
    * @param signatureInput - the signature material to use (e.g. key and header data)
    * @returns General JWS signature used as an `authorization` property.
    */
   public static async signAsAuthorization(
+    target: string,
     descriptor: Descriptor,
     signatureInput: SignatureInput
   ): Promise<GeneralJws> {
-    const descriptorCid = await computeCid(descriptor);
+    const descriptorCid = await generateCid(descriptor);
 
-    const authPayload: BaseDecodedAuthorizationPayload = { descriptorCid };
+    const authPayload: BaseDecodedAuthorizationPayload = { target, descriptorCid: descriptorCid.toString() };
     const authPayloadStr = JSON.stringify(authPayload);
     const authPayloadBytes = new TextEncoder().encode(authPayloadStr);
 
     const signer = await GeneralJwsSigner.create(authPayloadBytes, [signatureInput]);
 
     return signer.getJws();
-  }
-
-
-  /**
-   * @returns newest message in the array. `undefined` if given array is empty.
-   */
-  public static async getNewestMessage(messages: TimestampedMessage[]): Promise<TimestampedMessage | undefined> {
-    let currentNewestMessage: TimestampedMessage | undefined = undefined;
-    for (const message of messages) {
-      if (currentNewestMessage === undefined || await Message.isNewer(message, currentNewestMessage)) {
-        currentNewestMessage = message;
-      }
-    }
-
-    return currentNewestMessage;
-  }
-
-  /**
-   * Checks if first message is newer than second message.
-   * @returns `true` if `a` is newer than `b`; `false` otherwise
-   */
-  public static async isNewer(a: TimestampedMessage, b: TimestampedMessage): Promise<boolean> {
-    const aIsNewer = (await Message.compareModifiedTime(a, b) > 0);
-    return aIsNewer;
-  }
-
-  /**
-   * Checks if first message is older than second message.
-   * @returns `true` if `a` is older than `b`; `false` otherwise
-   */
-  public static async isOlder(a: TimestampedMessage, b: TimestampedMessage): Promise<boolean> {
-    const aIsNewer = (await Message.compareModifiedTime(a, b) < 0);
-    return aIsNewer;
-  }
-
-  /**
-   * Compares the `dateModified` of the given messages with a fallback to message CID according to the spec.
-   * @returns 1 if `a` is larger/newer than `b`; -1 if `a` is smaller/older than `b`; 0 otherwise (same age)
-   */
-  public static async compareModifiedTime(a: TimestampedMessage, b: TimestampedMessage): Promise<number> {
-    if (a.descriptor.dateModified > b.descriptor.dateModified) {
-      return 1;
-    } else if (a.descriptor.dateModified < b.descriptor.dateModified) {
-      return -1;
-    }
-
-    // else `dateModified` is the same between a and b
-    // compare the `dataCid` instead, the < and > operators compare strings in lexicographical order
-    return Message.compareCid(a, b);
   }
 }

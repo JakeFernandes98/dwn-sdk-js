@@ -1,57 +1,49 @@
-import type { BaseMessage } from './core/types.js';
-import type { DataStore } from './store/data-store.js';
+import type { DidMethodResolver } from './did/did-resolver.js';
 import type { MessageStore } from './store/message-store.js';
-import type { MethodHandler } from './interfaces/types.js';
-import type { Readable } from 'readable-stream';
-import type { TenantGate } from './core/tenant-gate.js';
+import type { BaseMessage, RequestSchema } from './core/types.js';
+import type { Interface, MethodHandler } from './interfaces/types.js';
 
-import { AllowAllTenantGate } from './core/tenant-gate.js';
-import { DataStoreLevel } from './store/data-store-level.js';
 import { DidResolver } from './did/did-resolver.js';
+import { Encoder } from './utils/encoder.js';
+import { Message } from './core/message.js';
 import { MessageReply } from './core/message-reply.js';
 import { MessageStoreLevel } from './store/message-store-level.js';
-import { PermissionsRequestHandler } from './interfaces/permissions/handlers/permissions-request.js';
-import { ProtocolsConfigureHandler } from './interfaces/protocols/handlers/protocols-configure.js';
-import { ProtocolsQueryHandler } from './interfaces/protocols/handlers/protocols-query.js';
-import { RecordsDeleteHandler } from './interfaces/records/handlers/records-delete.js';
-import { RecordsQueryHandler } from './interfaces/records/handlers/records-query.js';
-import { RecordsReadHandler } from './interfaces/records/handlers/records-read.js';
-import { RecordsWriteHandler } from './interfaces/records/handlers/records-write.js';
-import { DwnInterfaceName, DwnMethodName, Message } from './core/message.js';
+import { Request } from './core/request.js';
+import { Response } from './core/response.js';
+
+import { CollectionsInterface } from './interfaces/records/records-interface.js';
+import { PermissionsInterface } from './interfaces/permissions/permissions-interface.js';
+import { ProtocolsInterface } from './interfaces/protocols/protocols-interface.js';
 
 export class Dwn {
-  private methodHandlers: { [key:string]: MethodHandler };
-  private didResolver: DidResolver;
+  static methodHandlers: { [key:string]: MethodHandler } = {
+    ...CollectionsInterface.methodHandlers,
+    ...PermissionsInterface.methodHandlers,
+    ...ProtocolsInterface.methodHandlers
+  };
+
+  private DidResolver: DidResolver;
   private messageStore: MessageStore;
-  private dataStore: DataStore;
-  private tenantGate: TenantGate;
 
-  private constructor(config: DwnConfig) {
-    this.didResolver = config.didResolver;
+  private constructor(config: Config) {
+    this.DidResolver = new DidResolver(config.DidMethodResolvers);
     this.messageStore = config.messageStore;
-    this.dataStore = config.dataStore;
-    this.tenantGate = config.tenantGate;
-
-    this.methodHandlers = {
-      [DwnInterfaceName.Permissions + DwnMethodName.Request] : new PermissionsRequestHandler(this.didResolver, this.messageStore, this.dataStore),
-      [DwnInterfaceName.Protocols + DwnMethodName.Configure] : new ProtocolsConfigureHandler(this.didResolver, this.messageStore, this.dataStore),
-      [DwnInterfaceName.Protocols + DwnMethodName.Query]     : new ProtocolsQueryHandler(this.didResolver, this.messageStore, this.dataStore),
-      [DwnInterfaceName.Records + DwnMethodName.Delete]      : new RecordsDeleteHandler(this.didResolver, this.messageStore, this.dataStore),
-      [DwnInterfaceName.Records + DwnMethodName.Query]       : new RecordsQueryHandler(this.didResolver, this.messageStore, this.dataStore),
-      [DwnInterfaceName.Records + DwnMethodName.Read]        : new RecordsReadHandler(this.didResolver, this.messageStore, this.dataStore),
-      [DwnInterfaceName.Records + DwnMethodName.Write]       : new RecordsWriteHandler(this.didResolver, this.messageStore, this.dataStore),
-    };
   }
 
-  /**
-   * Creates an instance of the DWN.
-   */
-  public static async create(config?: DwnConfig): Promise<Dwn> {
-    config ??= { };
-    config.didResolver ??= new DidResolver();
-    config.tenantGate ??= new AllowAllTenantGate();
+  static async create(config: Config): Promise<Dwn> {
     config.messageStore ??= new MessageStoreLevel();
-    config.dataStore ??= new DataStoreLevel();
+    config.interfaces ??= [];
+
+    for (const { methodHandlers } of config.interfaces) {
+
+      for (const messageType in methodHandlers) {
+        if (Dwn.methodHandlers[messageType]) {
+          throw new Error(`methodHandler already exists for ${messageType}`);
+        } else {
+          Dwn.methodHandlers[messageType] = methodHandlers[messageType];
+        }
+      }
+    }
 
     const dwn = new Dwn(config);
     await dwn.open();
@@ -60,32 +52,56 @@ export class Dwn {
   }
 
   private async open(): Promise<void> {
-    await this.messageStore.open();
-    await this.dataStore.open();
+    return this.messageStore.open();
   }
 
-  public async close(): Promise<void> {
-    this.messageStore.close();
-    this.dataStore.close();
+  async close(): Promise<void> {
+    return this.messageStore.close();
   }
 
-  /**
-   * Processes the given DWN message and returns with a reply.
-   * @param tenant The tenant DID to route the given message to.
-   */
-  public async processMessage(tenant: string, rawMessage: any, dataStream?: Readable): Promise<MessageReply> {
-    const isTenant = await this.tenantGate.isTenant(tenant);
-    if (!isTenant) {
-      return new MessageReply({
-        status: { code: 401, detail: `${tenant} is not a tenant` }
+  async processRequest(rawRequest: Uint8Array): Promise<Response> {
+    let request: RequestSchema;
+    try {
+      const requestString = Encoder.bytesToString(rawRequest);
+      request = JSON.parse(requestString);
+    } catch {
+      throw new Error('expected request to be valid JSON');
+    }
+
+    try {
+      request = Request.parse(request);
+    } catch (e) {
+      return new Response({
+        status: { code: 400, message: e.message }
       });
     }
 
-    const dwnInterface = rawMessage?.descriptor?.interface;
+    const response = new Response();
+
+    for (const message of request.messages) {
+      let result;
+      try {
+        result = await this.processMessage(message);
+      } catch (error) {
+        result = new MessageReply({
+          status: { code: 500, detail: error.message }
+        });
+      }
+
+      response.addMessageResult(result);
+    }
+
+    return response;
+  }
+
+  /**
+   * Processes the given DWN message.
+   */
+  async processMessage(rawMessage: any): Promise<MessageReply> {
     const dwnMethod = rawMessage?.descriptor?.method;
-    if (dwnInterface === undefined || dwnMethod === undefined) {
+    if (dwnMethod === undefined) {
       return new MessageReply({
-        status: { code: 400, detail: `Both interface and method must be present, interface: ${dwnInterface}, method: ${dwnMethod}` }
+        status: { code: 400, detail: `unknown DWN method ${dwnMethod}` }
       });
     }
 
@@ -98,19 +114,15 @@ export class Dwn {
       });
     }
 
-    const handlerKey = dwnInterface + dwnMethod;
-    const methodHandlerReply = await this.methodHandlers[handlerKey].handle({
-      tenant,
-      message: rawMessage as BaseMessage,
-      dataStream
-    });
+    const interfaceMethodHandler = Dwn.methodHandlers[dwnMethod];
+
+    const methodHandlerReply = await interfaceMethodHandler(rawMessage as BaseMessage, this.messageStore, this.DidResolver);
     return methodHandlerReply;
   }
 };
 
-export type DwnConfig = {
-  didResolver?: DidResolver,
+export type Config = {
+  DidMethodResolvers?: DidMethodResolver[],
+  interfaces?: Interface[];
   messageStore?: MessageStore;
-  dataStore?: DataStore;
-  tenantGate?: TenantGate;
 };
