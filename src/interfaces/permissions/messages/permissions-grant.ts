@@ -9,6 +9,7 @@ import { getCurrentTimeInHighPrecision } from '../../../utils/time';
 import { Message } from '../../../core/message';
 import { v4 as uuidv4 } from 'uuid';
 import { DEFAULT_CONDITIONS, PermissionsRequest } from './permissions-request';
+import { validateAuthorizationIntegrity } from '../../../core/auth';
 
 type PermissionsGrantOptions = AuthCreateOptions & {
   target: string,
@@ -27,6 +28,12 @@ export class PermissionsGrant extends Message {
 
   constructor(message: PermissionsGrantMessage) {
     super(message);
+  }
+
+  public static async parse(message: PermissionsGrantMessage): Promise<PermissionsGrant> {
+    await validateAuthorizationIntegrity(message);
+
+    return new PermissionsGrant(message);
   }
 
   static async create(options: PermissionsGrantOptions): Promise<PermissionsGrant> {

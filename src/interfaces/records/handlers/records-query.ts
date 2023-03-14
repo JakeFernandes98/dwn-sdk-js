@@ -24,17 +24,25 @@ export const handleRecordsQuery: MethodHandler = async (
     });
   }
 
+  let externalRead = false
+
   try {
     await authenticate(message.authorization, didResolver);
     await recordsQuery.authorize();
   } catch (e) {
-    return new MessageReply({
-      status: { code: 401, detail: e.message }
-    });
+
+    let replies = await fetchGranted(message, messageStore)
+    if (replies.length == 0){
+      return new MessageReply({
+        status: { code: 401, detail: e.message }
+      });
+    } else {
+      externalRead = true
+    }
   }
 
   let records: BaseMessage[];
-  if (recordsQuery.author === recordsQuery.target) {
+  if (recordsQuery.author === recordsQuery.target || externalRead) {
     records = await fetchRecordsAsOwner(recordsQuery, messageStore);
   } else {
     records = await fetchRecordsAsNonOwner(recordsQuery, messageStore);
@@ -58,6 +66,21 @@ export const handleRecordsQuery: MethodHandler = async (
     entries
   });
 };
+
+async function fetchGranted(message, messageStore)
+: Promise<BaseMessage[]> {
+
+const includeCriteria = {
+  grantedBy: message.target,
+  grantedTo: message.author,
+  method: DwnMethodName.PermissionsGrant,
+};
+removeUndefinedProperties(includeCriteria);
+
+const granted = await messageStore.query(includeCriteria);
+return granted;
+}
+
 /**
  * Fetches the records as the owner of the DWN with no additional filtering.
  */
