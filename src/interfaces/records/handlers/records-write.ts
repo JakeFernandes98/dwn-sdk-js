@@ -6,6 +6,7 @@ import { MessageReply } from '../../../core/message-reply.js';
 import { RecordsWrite } from '../messages/records-write.js';
 
 import { DwnMethodName, Message } from '../../../core/message.js';
+import { removeUndefinedProperties } from '../../../utils/object.js';
 
 export const handleRecordsWrite: MethodHandler = async (
   message,
@@ -27,11 +28,16 @@ export const handleRecordsWrite: MethodHandler = async (
   try {
     await authenticate(message.authorization, didResolver);
     await recordsWrite.authorize(messageStore);
+    if(recordsWrite.author !== recordsWrite.target){
+      await permissionCheck(recordsWrite, messageStore)
+    }
   } catch (e) {
     return new MessageReply({
       status: { code: 401, detail: e.message }
     });
   }
+
+
 
   // get existing records matching the `recordId`
   const query = {
@@ -113,6 +119,34 @@ export const handleRecordsWrite: MethodHandler = async (
 
   return messageReply;
 };
+
+async function permissionCheck(recordsWrite, messageStore){
+
+  // console.log(recordsWrite)
+
+  const includeCriteria = {
+    grantedBy: recordsWrite.target,
+    grantedTo: recordsWrite.author,
+    method: DwnMethodName.PermissionsGrant,
+    scope: {
+      method: recordsWrite.message.descriptor.method,
+      schema: recordsWrite.message.descriptor.schema
+    }
+  };
+  // console.log("includeCriteria")
+  // console.log(includeCriteria)
+  removeUndefinedProperties(includeCriteria);
+  
+  const replies = await messageStore.query(includeCriteria);
+    
+  for(let i = 0; i<replies.length; i++){
+    if(replies[i].descriptor.grantedTo == recordsWrite.author && replies[i].descriptor.grantedBy == recordsWrite.target){
+      return true
+    }
+  }
+
+  throw new Error(`${recordsWrite.author} doesn't have access to ${recordsWrite.target} database`);
+}
 
 export async function constructIndexes(recordsWrite: RecordsWrite, isLatestBaseState: boolean): Promise<{ [key: string]: string }> {
   const message = recordsWrite.message;

@@ -33,6 +33,7 @@ export class DidIonResolver implements DidMethodResolver {
     }
 
     const didResolutionResult = await response.json();
+    // console.log(didResolutionResult.didDocument.verificationMethod)
     return didResolutionResult;
   }
 }
