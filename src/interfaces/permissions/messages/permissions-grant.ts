@@ -1,14 +1,16 @@
-import type { AuthCreateOptions } from '../../../core/types';
-import type { SignatureInput } from '../../../jose/jws/general/types';
-import type { PermissionConditions, PermissionScope } from '../types';
-import type { PermissionsGrantDescriptor, PermissionsGrantMessage } from '../types';
+import type { AuthCreateOptions } from '../../../core/types.js';
+import type { SignatureInput } from '../../../jose/jws/general/types.js';
+import type { PermissionConditions, PermissionScope } from '../types.js';
+import type { PermissionsGrantDescriptor, PermissionsGrantMessage } from '../types.js';
 
 import { CID } from 'multiformats/cid';
-import { generateCid } from '../../../utils/cid';
-import { getCurrentTimeInHighPrecision } from '../../../utils/time';
-import { Message } from '../../../core/message';
+import { generateCid } from '../../../utils/cid.js';
+import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
+import { Message } from '../../../core/message.js';
 import { v4 as uuidv4 } from 'uuid';
-import { DEFAULT_CONDITIONS, PermissionsRequest } from './permissions-request';
+import { DEFAULT_CONDITIONS, PermissionsRequest } from './permissions-request.js';
+import { validateAuthorizationIntegrity } from '../../../core/auth.js';
+import { removeUndefinedProperties } from '../../../utils/object.js';
 
 type PermissionsGrantOptions = AuthCreateOptions & {
   target: string,
@@ -29,6 +31,12 @@ export class PermissionsGrant extends Message {
     super(message);
   }
 
+  public static async parse(message: PermissionsGrantMessage): Promise<PermissionsGrant> {
+    await validateAuthorizationIntegrity(message);
+
+    return new PermissionsGrant(message);
+  }
+
   static async create(options: PermissionsGrantOptions): Promise<PermissionsGrant> {
     const { conditions } = options;
     const providedConditions = conditions ? conditions : {};
@@ -44,6 +52,8 @@ export class PermissionsGrant extends Message {
       objectId    : options.objectId ? options.objectId : uuidv4(),
       scope       : options.scope,
     };
+
+    removeUndefinedProperties(descriptor);
 
     Message.validateJsonSchema({ descriptor, authorization: { } });
 

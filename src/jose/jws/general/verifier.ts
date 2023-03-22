@@ -32,11 +32,15 @@ export class GeneralJwsVerifier {
       let isVerified: boolean;
       const cacheKey = `${signatureEntry.protected}.${this.jws.payload}.${signatureEntry.signature}`;
       const kid = GeneralJwsVerifier.getKid(signatureEntry);
+
+      // console.log('getting public JWK')
       const publicJwk = await GeneralJwsVerifier.getPublicKey(kid, didResolver);
+      // console.log(publicJwk)
 
       const cachedValue = await this.cache.get(cacheKey);
-
+      // console.log("Cached value ?", cachedValue)
       // explicit strict equality check to avoid potential buggy cache implementation causing incorrect truthy compare e.g. "false"
+
       if (cachedValue === undefined) {
         isVerified = await GeneralJwsVerifier.verifySignature(this.jws.payload, signatureEntry, publicJwk);
         await this.cache.set(cacheKey, isVerified);
@@ -44,7 +48,9 @@ export class GeneralJwsVerifier {
         isVerified = cachedValue;
       }
 
+      // console.log("Extracting DID")
       const did = GeneralJwsVerifier.extractDid(kid);
+      // console.log(did)
 
       if (isVerified) {
         signers.push(did);
@@ -60,7 +66,9 @@ export class GeneralJwsVerifier {
    * Gets the `kid` from a general JWS signature entry.
    */
   private static getKid(signatureEntry: SignatureEntry): string {
+    // console.log('Getting KID')
     const { kid } = Encoder.base64UrlToObject(signatureEntry.protected);
+    // console.log(kid)
     return kid;
   }
 
@@ -68,8 +76,10 @@ export class GeneralJwsVerifier {
    * Gets the DID from a general JWS signature entry.
    */
   public static getDid(signatureEntry: SignatureEntry): string {
+    // console.log('Getting DID')
     const kid = GeneralJwsVerifier.getKid(signatureEntry);
     const did = GeneralJwsVerifier.extractDid(kid);
+    // console.log(did)
     return did;
   }
 
@@ -79,16 +89,21 @@ export class GeneralJwsVerifier {
   public static async getPublicKey(kid: string, didResolver: DidResolver): Promise<PublicJwk> {
     // `resolve` throws exception if DID is invalid, DID method is not supported,
     // or resolving DID fails
+
     const did = GeneralJwsVerifier.extractDid(kid);
     const { didDocument } = await didResolver.resolve(did);
+    // console.log(didDocument)
     const { verificationMethod: verificationMethods = [] } = didDocument || {};
+    
 
     let verificationMethod: VerificationMethod | undefined;
+    // console.log('verification method', verificationMethods)
 
     for (const vm of verificationMethods) {
       // consider optimizing using a set for O(1) lookups if needed
       // key ID in DID Document may or may not be fully qualified. e.g.
       // `did:ion:alice#key1` or `#key1`
+      // console.log('vm option ', vm)
       if (kid.endsWith(vm.id)) {
         verificationMethod = vm;
         break;
@@ -99,14 +114,22 @@ export class GeneralJwsVerifier {
       throw new Error('public key needed to verify signature not found in DID Document');
     }
 
-    validateJsonSchema('JwkVerificationMethod', verificationMethod);
-
+    let verJson
+    if(did.split(':')[1] == 'ion'){
+      verJson = 'JwkVerificationMethodIon'
+    }else if(did.split(':')[1] == 'key'){
+      verJson = 'JwkVerificationMethod'
+    }
+    
+    validateJsonSchema(verJson, verificationMethod);
+    // console.log('Schema Validated')
     const { publicKeyJwk: publicJwk } = verificationMethod;
 
     return publicJwk as PublicJwk;
   }
 
   public static async verifySignature(base64UrlPayload: string, signatureEntry: SignatureEntry, jwkPublic: PublicJwk): Promise<boolean> {
+    // console.log("Verifying Signature..")
     const verifier = verifiers[jwkPublic.crv];
 
     if (!verifier) {
