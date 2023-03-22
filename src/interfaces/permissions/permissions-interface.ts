@@ -1,6 +1,6 @@
 import { handlePermissionsRequest } from './handlers/permissions-request.js';
+import { handlePermissionsGrant } from './handlers/permissions-grant.js';
 import { PermissionsRequest } from './messages/permissions-request.js';
-import { handlePermissionsGrant } from './handlers/permissions-grant.js'
 import { PermissionsGrant } from './messages/permissions-grant.js';
 
 export const PermissionsInterface = {

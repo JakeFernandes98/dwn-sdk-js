@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://identity.foundation/dwn/json-schemas/hooks-write.json",
+  "$id": "https://identity.foundation/dwn/json-schemas/records-delete.json",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,38 +17,27 @@
       "required": [
         "interface",
         "method",
-        "dateCreated",
-        "uri",
-        "filter"
+        "dateModified",
+        "recordId"
       ],
       "properties": {
         "interface": {
           "enum": [
-            "Hooks"
+            "Records"
           ],
           "type": "string"
         },
         "method": {
           "enum": [
-            "Write"
+            "Delete"
           ],
           "type": "string"
         },
-        "dateCreated": {
+        "dateModified": {
           "type": "string"
         },
-        "schema": {
+        "recordId": {
           "type": "string"
-        },
-        "filter": {
-          "type": "object",
-          "minProperties": 1,
-          "additionalProperties": false,
-          "properties": {
-            "method": {
-              "type": "string"
-            }
-          }
         }
       }
     }

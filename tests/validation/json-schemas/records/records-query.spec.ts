@@ -1,11 +1,12 @@
 import { expect } from 'chai';
 import { Message } from '../../../../src/core/message.js';
 
-describe('RecordsQuery schema definition', () => {
+describe('RecordsQuery schema validation', () => {
   it('should allow descriptor with only required properties', async () => {
     const validMessage = {
       descriptor: {
-        method      : 'RecordsQuery',
+        interface   : 'Records',
+        method      : 'Query',
         dateCreated : '123',
         filter      : { schema: 'anySchema' }
       },
@@ -23,7 +24,8 @@ describe('RecordsQuery schema definition', () => {
   it('should throw if `authorization` is missing', () => {
     const invalidMessage = {
       descriptor: {
-        method      : 'RecordsQuery',
+        interface   : 'Records',
+        method      : 'Query',
         dateCreated : '123',
         filter      : { schema: 'anySchema' }
       }
@@ -37,7 +39,8 @@ describe('RecordsQuery schema definition', () => {
   it('should throw if unknown property is given in message', () => {
     const invalidMessage = {
       descriptor: {
-        method      : 'RecordsQuery',
+        interface   : 'Records',
+        method      : 'Query',
         dateCreated : '123',
         filter      : { schema: 'anySchema' }
       },
@@ -59,7 +62,8 @@ describe('RecordsQuery schema definition', () => {
   it('should throw if unknown property is given in the `descriptor`', () => {
     const invalidMessage = {
       descriptor: {
-        method          : 'RecordsQuery',
+        interface       : 'Records',
+        method          : 'Query',
         dateCreated     : '123',
         filter          : { schema: 'anySchema' },
         unknownProperty : 'unknownProperty' // unknown property
@@ -78,34 +82,14 @@ describe('RecordsQuery schema definition', () => {
     }).throws('must NOT have additional properties');
   });
 
-  it('should throw if empty `filter` property is given in the `descriptor`', () => {
-    const invalidMessage = {
-      descriptor: {
-        method      : 'RecordsQuery',
-        dateCreated : '123',
-        filter      : { }
-      },
-      authorization: {
-        payload    : 'anyPayload',
-        signatures : [{
-          protected : 'anyProtectedHeader',
-          signature : 'anySignature'
-        }]
-      },
-    };
-
-    expect(() => {
-      Message.validateJsonSchema(invalidMessage);
-    }).throws('/descriptor/filter: must NOT have fewer than 1 properties');
-  });
-
   it('should only allows string values from the spec for `dateSort`', () => {
     // test all valid values of `dateSort`
     const allowedDateSortValues = ['createdAscending', 'createdDescending', 'publishedAscending', 'publishedAscending'];
     for (const dateSortValue of allowedDateSortValues) {
       const validMessage = {
         descriptor: {
-          method      : 'RecordsQuery',
+          interface   : 'Records',
+          method      : 'Query',
           dateCreated : '123',
           filter      : { schema: 'anySchema' },
           dateSort    : dateSortValue
@@ -125,7 +109,8 @@ describe('RecordsQuery schema definition', () => {
     // test an invalid values of `dateSort`
     const invalidMessage = {
       descriptor: {
-        method      : 'RecordsQuery',
+        interface   : 'Records',
+        method      : 'Query',
         dateCreated : '123',
         filter      : { schema: 'anySchema' },
         dateSort    : 'unacceptable', // bad value
@@ -142,5 +127,73 @@ describe('RecordsQuery schema definition', () => {
     expect(() => {
       Message.validateJsonSchema(invalidMessage);
     }).throws('dateSort: must be equal to one of the allowed values');
+  });
+
+  describe('`filter` property validation', () => {
+    it('should throw if empty `filter` property is given in the `descriptor`', () => {
+      const invalidMessage = {
+        descriptor: {
+          interface   : 'Records',
+          method      : 'Query',
+          dateCreated : '123',
+          filter      : { }
+        },
+        authorization: {
+          payload    : 'anyPayload',
+          signatures : [{
+            protected : 'anyProtectedHeader',
+            signature : 'anySignature'
+          }]
+        },
+      };
+
+      expect(() => {
+        Message.validateJsonSchema(invalidMessage);
+      }).throws('/descriptor/filter: must NOT have fewer than 1 properties');
+    });
+
+    it('should throw if `dateCreated` criteria given is an empty object', () => {
+      const invalidMessage = {
+        descriptor: {
+          interface   : 'Records',
+          method      : 'Query',
+          dateCreated : '123',
+          filter      : { dateCreated: { } } // empty `dateCreated` criteria
+        },
+        authorization: {
+          payload    : 'anyPayload',
+          signatures : [{
+            protected : 'anyProtectedHeader',
+            signature : 'anySignature'
+          }]
+        },
+      };
+
+      expect(() => {
+        Message.validateJsonSchema(invalidMessage);
+      }).throws('dateCreated: must NOT have fewer than 1 properties');
+    });
+
+    it('should throw if `dateCreated` criteria has unexpected properties', () => {
+      const invalidMessage = {
+        descriptor: {
+          interface   : 'Records',
+          method      : 'Query',
+          dateCreated : '123',
+          filter      : { dateCreated: { unexpectedProperty: 'anyValue' } } // unexpected property in `dateCreated` criteria
+        },
+        authorization: {
+          payload    : 'anyPayload',
+          signatures : [{
+            protected : 'anyProtectedHeader',
+            signature : 'anySignature'
+          }]
+        },
+      };
+
+      expect(() => {
+        Message.validateJsonSchema(invalidMessage);
+      }).throws('must NOT have additional properties');
+    });
   });
 });

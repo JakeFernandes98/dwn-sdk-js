@@ -6,9 +6,11 @@ describe('RecordsWrite schema definition', () => {
     const validMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456',
       },
@@ -26,9 +28,11 @@ describe('RecordsWrite schema definition', () => {
   it('should throw if `recordId` is missing', async () => {
     const message = {
       descriptor: {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456'
       },
@@ -50,9 +54,11 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456'
       }
@@ -67,9 +73,11 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456'
       },
@@ -92,9 +100,11 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method          : 'RecordsWrite',
+        interface       : 'Records',
+        method          : 'Write',
         dataCid         : 'anyCid',
         dataFormat      : 'application/json',
+        dataSize        : 123,
         dateCreated     : '2022-12-19T10:20:30.123456',
         dateModified    : '2022-12-19T10:20:30.123456',
         unknownProperty : 'unknownProperty' // unknown property
@@ -113,40 +123,17 @@ describe('RecordsWrite schema definition', () => {
     }).throws('must NOT have additional properties');
   });
 
-  it('should throw if `encodedData` is not using base64url character set', () => {
-    const invalidMessage = {
-      recordId   : 'anyRecordId',
-      descriptor : {
-        method       : 'RecordsWrite',
-        dataCid      : 'anyCid',
-        dataFormat   : 'application/json',
-        dateCreated  : '2022-12-19T10:20:30.123456',
-        dateModified : '2022-12-19T10:20:30.123456'
-      },
-      authorization: {
-        payload    : 'anyPayload',
-        signatures : [{
-          protected : 'anyProtectedHeader',
-          signature : 'anySignature'
-        }]
-      },
-      encodedData: 'not-base64url-string!!' // incorrect value
-    };
-
-    expect(() => {
-      Message.validateJsonSchema(invalidMessage);
-    }).throws('must match pattern "^[A-Za-z0-9_-]+$"');
-  });
-
   it('should pass if `contextId` and `protocol` are both present', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       contextId  : 'someContext', // protocol must exist
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         protocol     : 'someProtocolId', // contextId must exist
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456'
       },
@@ -156,8 +143,7 @@ describe('RecordsWrite schema definition', () => {
           protected : 'anyProtectedHeader',
           signature : 'anySignature'
         }]
-      },
-      encodedData: 'anything'
+      }
     };
 
     Message.validateJsonSchema(invalidMessage);
@@ -167,9 +153,11 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456'
       },
@@ -179,8 +167,7 @@ describe('RecordsWrite schema definition', () => {
           protected : 'anyProtectedHeader',
           signature : 'anySignature'
         }]
-      },
-      encodedData: 'anything'
+      }
     };
 
     Message.validateJsonSchema(invalidMessage);
@@ -191,9 +178,11 @@ describe('RecordsWrite schema definition', () => {
       recordId   : 'anyRecordId',
       contextId  : 'invalid', // must have `protocol` to exist
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456'
       },
@@ -203,8 +192,7 @@ describe('RecordsWrite schema definition', () => {
           protected : 'anyProtectedHeader',
           signature : 'anySignature'
         }]
-      },
-      encodedData: 'anything'
+      }
     };
 
     expect(() => {
@@ -216,10 +204,12 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         protocol     : 'invalid', // must have `contextId` to exist
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456'
       },
@@ -229,8 +219,7 @@ describe('RecordsWrite schema definition', () => {
           protected : 'anyProtectedHeader',
           signature : 'anySignature'
         }]
-      },
-      encodedData: 'anything'
+      }
     };
 
     expect(() => {
@@ -242,9 +231,11 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method        : 'RecordsWrite',
+        interface     : 'Records',
+        method        : 'Write',
         dataCid       : 'anyCid',
         dataFormat    : 'application/json',
+        dataSize      : 123,
         dateModified  : '2022-12-19T10:20:30.123456',
         published     : false,
         dateCreated   : '2022-12-19T10:20:30.123456',
@@ -256,8 +247,7 @@ describe('RecordsWrite schema definition', () => {
           protected : 'anyProtectedHeader',
           signature : 'anySignature'
         }]
-      },
-      encodedData: 'anything'
+      }
     };
 
     expect(() => {
@@ -269,9 +259,11 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method       : 'RecordsWrite',
+        interface    : 'Records',
+        method       : 'Write',
         dataCid      : 'anyCid',
         dataFormat   : 'application/json',
+        dataSize     : 123,
         dateCreated  : '2022-12-19T10:20:30.123456',
         dateModified : '2022-12-19T10:20:30.123456',
         published    : true //datePublished must be present
@@ -282,8 +274,7 @@ describe('RecordsWrite schema definition', () => {
           protected : 'anyProtectedHeader',
           signature : 'anySignature'
         }]
-      },
-      encodedData: 'anything'
+      }
     };
 
     expect(() => {
@@ -295,9 +286,11 @@ describe('RecordsWrite schema definition', () => {
     const invalidMessage = {
       recordId   : 'anyRecordId',
       descriptor : {
-        method        : 'RecordsWrite',
+        interface     : 'Records',
+        method        : 'Write',
         dataCid       : 'anyCid',
         dataFormat    : 'application/json',
+        dataSize      : 123,
         dateCreated   : '2022-12-19T10:20:30.123456',
         dateModified  : '2022-12-19T10:20:30.123456',
         datePublished : '2022-12-19T10:20:30.123456' //published must be present
@@ -308,8 +301,7 @@ describe('RecordsWrite schema definition', () => {
           protected : 'anyProtectedHeader',
           signature : 'anySignature'
         }]
-      },
-      encodedData: 'anything'
+      }
     };
 
     expect(() => {

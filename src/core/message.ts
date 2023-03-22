@@ -17,7 +17,7 @@ export enum DwnMethodName {
   HooksWrite = 'HooksWrite',
   ProtocolsConfigure = 'ProtocolsConfigure',
   ProtocolsQuery = 'ProtocolsQuery',
-  PermissionsGrant = "PermissionsGrant"
+  PermissionsGrant = 'PermissionsGrant'
 }
 
 export abstract class Message {

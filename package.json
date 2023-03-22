@@ -7,9 +7,15 @@
   "engines": {
     "node": ">= 16"
   },
-  "exports": "./dist/esm/src/index.js",
+  "main": "./dist/cjs/src/index.js",
+  "module": "./dist/esm/src/index.js",
+  "exports": {
+    "import": "./dist/esm/src/index.js",
+    "require": "./dist/cjs/src/index.js"
+  },
   "browser": {
-    "./dist/esm/src/index.js": "./dist/bundles/browser.js"
+    "./dist/esm/src/index.js": "./dist/bundles/browser.js",
+    "./dist/cjs/src/index.js": "./dist/bundles/browser.js"
   },
   "@comment files": [
     "the files property informs npm about which files we want to include in our published package.",
@@ -19,9 +25,14 @@
     "dist",
     "src"
   ],
+  "@comment react-native": [
+    "directive for metro (react native build tool)."
+  ],
+  "react-native": "./dist/esm/src/index.js",
   "scripts": {
     "build:esm": "tsc",
-    "build": "npm-run-all -l clean compile-validators -p build:esm bundle",
+    "build:cjs": "tsc --project tsconfig.cjs.json && echo {\"type\": \"commonjs\"} > ./dist/cjs/package.json",
+    "build": "npm-run-all -l clean compile-validators -p build:esm build:cjs bundle",
     "bundle": "node ./build/create-browser-bundle.cjs",
     "clean": "rimraf dist && rimraf generated/*",
     "compile-validators": "node ./build/compile-validators.js",

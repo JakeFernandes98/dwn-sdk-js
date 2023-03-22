@@ -5,75 +5,85 @@ import sinon from 'sinon';
 import chai, { expect } from 'chai';
 
 import { base64url } from 'multiformats/bases/base64';
+import { computeCid } from '../../../../src/utils/cid.js';
+import { DataStoreLevel } from '../../../../src/store/data-store-level.js';
+import { DataStream } from '../../../../src/utils/data-stream.js';
 import { DidKeyResolver } from '../../../../src/did/did-key-resolver.js';
 import { DidResolver } from '../../../../src/did/did-resolver.js';
+import { DwnErrorCode } from '../../../../src/core/dwn-error.js';
 import { Encoder } from '../../../../src/utils/encoder.js';
 import { GeneralJwsSigner } from '../../../../src/jose/jws/general/signer.js';
 import { getCurrentTimeInHighPrecision } from '../../../../src/utils/time.js';
-import { handleProtocolsConfigure } from '../../../../src/interfaces/protocols/handlers/protocols-configure.js';
-import { handleRecordsQuery } from '../../../../src/interfaces/records/handlers/records-query.js';
-import { handleRecordsWrite } from '../../../../src/interfaces/records/handlers/records-write.js';
 import { Message } from '../../../../src/core/message.js';
 import { MessageStoreLevel } from '../../../../src/store/message-store-level.js';
+import { QueryResultEntry } from '../../../../src/core/types.js';
+import { RecordsWriteHandler } from '../../../../src/interfaces/records/handlers/records-write.js';
 import { RecordsWriteMessage } from '../../../../src/interfaces/records/types.js';
-import { TestDataGenerator } from '../../../utils/test-data-generator.js';
+import { StorageController } from '../../../../src/store/storage-controller.js';
 import { TestStubGenerator } from '../../../utils/test-stub-generator.js';
 
-import { ProtocolDefinition, RecordsWrite } from '../../../../src/index.js';
+import { Dwn, Jws, ProtocolDefinition, RecordsWrite } from '../../../../src/index.js';
+import { GenerateFromRecordsWriteOut, TestDataGenerator } from '../../../utils/test-data-generator.js';
 
 chai.use(chaiAsPromised);
 
-describe('handleRecordsWrite()', () => {
+describe('RecordsWriteHandler.handle()', () => {
   let didResolver: DidResolver;
   let messageStore: MessageStoreLevel;
+  let dataStore: DataStoreLevel;
+  let dwn: Dwn;
 
   describe('functional tests', () => {
     before(async () => {
       didResolver = new DidResolver([new DidKeyResolver()]);
 
-      // important to follow this pattern to initialize the message store in tests
+      // important to follow this pattern to initialize and clean the message and data store in tests
       // so that different suites can reuse the same block store and index location for testing
       messageStore = new MessageStoreLevel({
         blockstoreLocation : 'TEST-BLOCKSTORE',
         indexLocation      : 'TEST-INDEX'
       });
 
-      await messageStore.open();
+      dataStore = new DataStoreLevel({
+        blockstoreLocation: 'TEST-DATASTORE'
+      });
+
+      dwn = await Dwn.create({ didResolver, messageStore, dataStore });
     });
 
     beforeEach(async () => {
-      await messageStore.clear(); // clean up before each test rather than after so that a test does not depend on other tests to do the clean up
+      sinon.restore(); // wipe all previous stubs/spies/mocks/fakes
+
+      // clean up before each test rather than after so that a test does not depend on other tests to do the clean up
+      await messageStore.clear();
+      await dataStore.clear();
     });
 
     after(async () => {
-      await messageStore.close();
+      await dwn.close();
     });
 
     it('should only be able to overwrite existing record if new record has a later `dateModified` value', async () => {
       // write a message into DB
-      const requester = await TestDataGenerator.generatePersona();
-      const target = requester;
+      const requester = await DidKeyResolver.generate();
       const data1 = new TextEncoder().encode('data1');
-      const recordsWriteMessageData = await TestDataGenerator.generateRecordsWriteMessage({ requester, target, data: data1 });
+      const recordsWriteMessageData = await TestDataGenerator.generateRecordsWrite({ requester, data: data1 });
 
-      // setting up a stub did resolver
-      const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
-
-      const recordsWriteReply = await handleRecordsWrite(recordsWriteMessageData.message, messageStore, didResolverStub);
+      const tenant = requester.did;
+      const recordsWriteReply = await dwn.processMessage(tenant, recordsWriteMessageData.message, recordsWriteMessageData.dataStream);
       expect(recordsWriteReply.status.code).to.equal(202);
 
       const recordId = recordsWriteMessageData.message.recordId;
-      const recordsQueryMessageData = await TestDataGenerator.generateRecordsQueryMessage({
+      const recordsQueryMessageData = await TestDataGenerator.generateRecordsQuery({
         requester,
-        target,
         filter: { recordId }
       });
 
       // verify the message written can be queried
-      const recordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+      const recordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
       expect(recordsQueryReply.status.code).to.equal(200);
       expect(recordsQueryReply.entries?.length).to.equal(1);
-      expect((recordsQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(base64url.baseEncode(data1));
+      expect(recordsQueryReply.entries![0].encodedData).to.equal(base64url.baseEncode(data1));
 
       // generate and write a new RecordsWrite to overwrite the existing record
       // a new RecordsWrite by default will have a later `dateModified`
@@ -86,44 +96,42 @@ describe('handleRecordsWrite()', () => {
       });
 
       // sanity check that old data and new data are different
-      expect(newDataEncoded).to.not.equal(recordsWriteMessageData.message.encodedData);
+      expect(newDataEncoded).to.not.equal(Encoder.bytesToBase64Url(recordsWriteMessageData.dataBytes));
 
-      const newRecordsWriteReply = await handleRecordsWrite(newRecordsWrite.message, messageStore, didResolverStub);
+      const newRecordsWriteReply = await dwn.processMessage(tenant, newRecordsWrite.message, newRecordsWrite.dataStream);
       expect(newRecordsWriteReply.status.code).to.equal(202);
 
       // verify new record has overwritten the existing record
-      const newRecordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+      const newRecordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
 
       expect(newRecordsQueryReply.status.code).to.equal(200);
       expect(newRecordsQueryReply.entries?.length).to.equal(1);
-      expect((newRecordsQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(newDataEncoded);
+      expect(newRecordsQueryReply.entries![0].encodedData).to.equal(newDataEncoded);
 
       // try to write the older message to store again and verify that it is not accepted
-      const thirdRecordsWriteReply = await handleRecordsWrite(recordsWriteMessageData.message, messageStore, didResolverStub);
+      const thirdRecordsWriteReply = await dwn.processMessage(tenant, recordsWriteMessageData.message, recordsWriteMessageData.dataStream);
       expect(thirdRecordsWriteReply.status.code).to.equal(409); // expecting to fail
 
       // expecting unchanged
-      const thirdRecordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+      const thirdRecordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
       expect(thirdRecordsQueryReply.status.code).to.equal(200);
       expect(thirdRecordsQueryReply.entries?.length).to.equal(1);
-      expect((thirdRecordsQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(newDataEncoded);
+      expect(thirdRecordsQueryReply.entries![0].encodedData).to.equal(newDataEncoded);
     });
 
     it('should only be able to overwrite existing record if new message CID is larger when `dateModified` value is the same', async () => {
       // start by writing an originating message
       const requester = await TestDataGenerator.generatePersona();
-      const target = requester;
-      const originatingMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+      const tenant = requester.did;
+      const originatingMessageData = await TestDataGenerator.generateRecordsWrite({
         requester,
-        target,
         data: Encoder.stringToBytes('unused')
       });
 
-      // setting up a stub did resolver
-      const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
+      // setting up a stub DID resolver
+      TestStubGenerator.stubDidResolver(didResolver, [requester]);
 
-      // sanity check that originating message got written
-      const originatingMessageWriteReply = await handleRecordsWrite(originatingMessageData.message, messageStore, didResolverStub);
+      const originatingMessageWriteReply = await dwn.processMessage(tenant, originatingMessageData.message, originatingMessageData.dataStream);
       expect(originatingMessageWriteReply.status.code).to.equal(202);
 
       // generate two new RecordsWrite messages with the same `dateModified` value
@@ -133,7 +141,6 @@ describe('handleRecordsWrite()', () => {
         existingWrite: originatingMessageData.recordsWrite,
         dateModified
       });
-
       const recordsWrite2 = await TestDataGenerator.generateFromRecordsWrite({
         requester,
         existingWrite: originatingMessageData.recordsWrite,
@@ -143,65 +150,67 @@ describe('handleRecordsWrite()', () => {
       // determine the lexicographical order of the two messages
       const message1Cid = await Message.getCid(recordsWrite1.message);
       const message2Cid = await Message.getCid(recordsWrite2.message);
-      let largerCollectionWrite: RecordsWrite;
-      let smallerCollectionWrite: RecordsWrite;
+      let newerWrite: GenerateFromRecordsWriteOut;
+      let olderWrite: GenerateFromRecordsWriteOut;
       if (message1Cid > message2Cid) {
-        largerCollectionWrite = recordsWrite1;
-        smallerCollectionWrite = recordsWrite2;
+        newerWrite = recordsWrite1;
+        olderWrite = recordsWrite2;
       } else {
-        largerCollectionWrite = recordsWrite2;
-        smallerCollectionWrite = recordsWrite1;
+        newerWrite = recordsWrite2;
+        olderWrite = recordsWrite1;
       }
 
       // write the message with the smaller lexicographical message CID first
-      const recordsWriteReply = await handleRecordsWrite(smallerCollectionWrite.message, messageStore, didResolverStub);
+      const recordsWriteReply = await dwn.processMessage(tenant, olderWrite.message, olderWrite.dataStream);
       expect(recordsWriteReply.status.code).to.equal(202);
 
       // query to fetch the record
-      const recordsQueryMessageData = await TestDataGenerator.generateRecordsQueryMessage({
+      const recordsQueryMessageData = await TestDataGenerator.generateRecordsQuery({
         requester,
-        target,
         filter: { recordId: originatingMessageData.message.recordId }
       });
 
       // verify the data is written
-      const recordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+      const recordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
       expect(recordsQueryReply.status.code).to.equal(200);
       expect(recordsQueryReply.entries?.length).to.equal(1);
       expect((recordsQueryReply.entries![0] as RecordsWriteMessage).descriptor.dataCid)
-        .to.equal(smallerCollectionWrite.message.descriptor.dataCid);
+        .to.equal(olderWrite.message.descriptor.dataCid);
 
       // attempt to write the message with larger lexicographical message CID
-      const newRecordsWriteReply = await handleRecordsWrite(largerCollectionWrite.message, messageStore, didResolverStub);
+      const newRecordsWriteReply = await dwn.processMessage(tenant, newerWrite.message, newerWrite.dataStream);
       expect(newRecordsWriteReply.status.code).to.equal(202);
 
       // verify new record has overwritten the existing record
-      const newRecordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+      const newRecordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
       expect(newRecordsQueryReply.status.code).to.equal(200);
       expect(newRecordsQueryReply.entries?.length).to.equal(1);
       expect((newRecordsQueryReply.entries![0] as RecordsWriteMessage).descriptor.dataCid)
-        .to.equal(largerCollectionWrite.message.descriptor.dataCid);
+        .to.equal(newerWrite.message.descriptor.dataCid);
 
       // try to write the message with smaller lexicographical message CID again
-      const thirdRecordsWriteReply = await handleRecordsWrite(
-        smallerCollectionWrite.message,
-        messageStore,
-        didResolverStub
+      const thirdRecordsWriteReply = await dwn.processMessage(
+        tenant,
+        olderWrite.message,
+        DataStream.fromBytes(olderWrite.dataBytes) // need to create data stream again since it's already used above
       );
       expect(thirdRecordsWriteReply.status.code).to.equal(409); // expecting to fail
 
       // verify the message in store is still the one with larger lexicographical message CID
-      const thirdRecordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+      const thirdRecordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
       expect(thirdRecordsQueryReply.status.code).to.equal(200);
       expect(thirdRecordsQueryReply.entries?.length).to.equal(1);
       expect((thirdRecordsQueryReply.entries![0] as RecordsWriteMessage).descriptor.dataCid)
-        .to.equal(largerCollectionWrite.message.descriptor.dataCid); // expecting unchanged
+        .to.equal(newerWrite.message.descriptor.dataCid); // expecting unchanged
     });
 
     it('should not allow changes to immutable properties', async () => {
-      const initialWriteData = await TestDataGenerator.generateRecordsWriteMessage();
-      const didResolverStub = TestStubGenerator.createDidResolverStub(initialWriteData.requester);
-      const initialWriteReply = await handleRecordsWrite(initialWriteData.message, messageStore, didResolverStub);
+      const initialWriteData = await TestDataGenerator.generateRecordsWrite();
+      const tenant = initialWriteData.requester.did;
+
+      TestStubGenerator.stubDidResolver(didResolver, [initialWriteData.requester]);
+
+      const initialWriteReply = await dwn.processMessage(tenant, initialWriteData.message, initialWriteData.dataStream);
       expect(initialWriteReply.status.code).to.equal(202);
 
       const recordId = initialWriteData.message.recordId;
@@ -209,124 +218,164 @@ describe('handleRecordsWrite()', () => {
       const schema = initialWriteData.message.descriptor.schema;
 
       // dateCreated test
-      let childMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+      let childMessageData = await TestDataGenerator.generateRecordsWrite({
         requester   : initialWriteData.requester,
-        target      : initialWriteData.target,
         recordId,
         schema,
         dateCreated : getCurrentTimeInHighPrecision(), // should not be allowed to be modified
         dataFormat  : initialWriteData.message.descriptor.dataFormat
       });
 
-      let reply = await handleRecordsWrite(childMessageData.message, messageStore, didResolverStub);
+      let reply = await dwn.processMessage(tenant, childMessageData.message, childMessageData.dataStream);
 
       expect(reply.status.code).to.equal(400);
       expect(reply.status.detail).to.contain('dateCreated is an immutable property');
 
       // schema test
-      childMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+      childMessageData = await TestDataGenerator.generateRecordsWrite({
         requester  : initialWriteData.requester,
-        target     : initialWriteData.target,
         recordId,
         schema     : 'should-not-allowed-to-be-modified',
         dateCreated,
         dataFormat : initialWriteData.message.descriptor.dataFormat
       });
 
-      reply = await handleRecordsWrite(childMessageData.message, messageStore, didResolverStub);
+      reply = await dwn.processMessage(tenant, childMessageData.message, childMessageData.dataStream);
 
       expect(reply.status.code).to.equal(400);
       expect(reply.status.detail).to.contain('schema is an immutable property');
 
       // dataFormat test
-      childMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+      childMessageData = await TestDataGenerator.generateRecordsWrite({
         requester  : initialWriteData.requester,
-        target     : initialWriteData.target,
         recordId,
         schema,
         dateCreated,
         dataFormat : 'should-not-be-allowed-to-change'
       });
 
-      reply = await handleRecordsWrite(childMessageData.message, messageStore, didResolverStub);
+      reply = await dwn.processMessage(tenant, childMessageData.message, childMessageData.dataStream);
 
       expect(reply.status.code).to.equal(400);
       expect(reply.status.detail).to.contain('dataFormat is an immutable property');
     });
 
-    describe('initial write tests', () => {
+    it('should return 400 if actual data size mismatches with `dataSize` in descriptor', async () => {
+      const alice = await DidKeyResolver.generate();
+      const { message, dataStream } = await TestDataGenerator.generateRecordsWrite({ requester: alice });
+
+      // replace the dataSize to simulate mismatch, will need to generate `recordId` and `authorization` property again
+      message.descriptor.dataSize = 1;
+      const descriptorCid = await computeCid(message.descriptor);
+      const recordId = await RecordsWrite.getEntryId(alice.did, message.descriptor);
+      const authorizationSignatureInput = Jws.createSignatureInput(alice);
+      const authorization = await RecordsWrite['createAuthorization'](recordId, message.contextId, descriptorCid, message.attestation, authorizationSignatureInput);
+      message.recordId = recordId;
+      message.authorization = authorization;
+
+      const reply = await dwn.processMessage(alice.did, message, dataStream);
+      expect(reply.status.code).to.equal(400);
+      expect(reply.status.detail).to.contain('does not match dataSize in descriptor');
+    });
+
+    it('should return 400 if actual data CID of mismatches with `dataCid` in descriptor', async () => {
+      const alice = await DidKeyResolver.generate();
+      const { message } = await TestDataGenerator.generateRecordsWrite({ requester: alice });
+      const dataStream = DataStream.fromBytes(TestDataGenerator.randomBytes(32)); // mismatch data stream
+
+      const reply = await dwn.processMessage(alice.did, message, dataStream);
+      expect(reply.status.code).to.equal(400);
+      expect(reply.status.detail).to.contain('does not match dataCid in descriptor');
+    });
+
+    it('should return 400 if attempting to write a record without data stream and the data does not already exist in DWN', async () => {
+      const alice = await DidKeyResolver.generate();
+
+      const { message } = await TestDataGenerator.generateRecordsWrite({
+        requester: alice,
+      });
+
+      const reply = await dwn.processMessage(alice.did, message);
+
+      expect(reply.status.code).to.equal(400);
+      expect(reply.status.detail).to.contain(DwnErrorCode.MessageStoreDataNotFound);
+    });
+
+    describe('initial write & subsequent write tests', () => {
       describe('createFrom()', () => {
-        it('should accept a publish RecordsWrite using createFrom() without specifying datePublished', async () => {
-          const { message, requester, recordsWrite } = await TestDataGenerator.generateRecordsWriteMessage({
+        it('should accept a published RecordsWrite using createFrom() without specifying `data` or `datePublished`', async () => {
+          const { message, requester, recordsWrite, dataStream, dataBytes } = await TestDataGenerator.generateRecordsWrite({
             published: false
           });
+          const tenant = requester.did;
 
           // setting up a stub DID resolver
-          const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
-          const reply = await handleRecordsWrite(message, messageStore, didResolverStub);
+          TestStubGenerator.stubDidResolver(didResolver, [requester]);
+
+          const reply = await dwn.processMessage(tenant, message, dataStream);
 
           expect(reply.status.code).to.equal(202);
 
           const newWrite = await RecordsWrite.createFrom({
-            target                      : requester.did,
             unsignedRecordsWriteMessage : recordsWrite.message,
             published                   : true,
-            signatureInput              : TestDataGenerator.createSignatureInputFromPersona(requester)
+            authorizationSignatureInput : Jws.createSignatureInput(requester)
           });
 
-          const newWriteReply = await handleRecordsWrite(newWrite.message, messageStore, didResolverStub);
+          const newWriteReply = await dwn.processMessage(tenant, newWrite.message);
 
           expect(newWriteReply.status.code).to.equal(202);
 
           // verify the new record state can be queried
-          const recordsQueryMessageData = await TestDataGenerator.generateRecordsQueryMessage({
+          const recordsQueryMessageData = await TestDataGenerator.generateRecordsQuery({
             requester,
-            target : requester,
-            filter : { recordId: message.recordId }
+            filter: { recordId: message.recordId }
           });
 
-          const recordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+          const recordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
           expect(recordsQueryReply.status.code).to.equal(200);
           expect(recordsQueryReply.entries?.length).to.equal(1);
           expect((recordsQueryReply.entries![0] as RecordsWriteMessage).descriptor.published).to.equal(true);
+
+          // very importantly verify the original data is still returned
+          expect(recordsQueryReply.entries![0].encodedData).to.equal(Encoder.bytesToBase64Url(dataBytes));
         });
 
         it('should inherit parent published state when using createFrom() to create RecordsWrite', async () => {
-          const { message, requester, recordsWrite } = await TestDataGenerator.generateRecordsWriteMessage({
+          const { message, requester, recordsWrite, dataStream } = await TestDataGenerator.generateRecordsWrite({
             published: true
           });
+          const tenant = requester.did;
 
           // setting up a stub DID resolver
-          const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
-          const reply = await handleRecordsWrite(message, messageStore, didResolverStub);
+          TestStubGenerator.stubDidResolver(didResolver, [requester]);
+          const reply = await dwn.processMessage(tenant, message, dataStream);
 
           expect(reply.status.code).to.equal(202);
 
           const newData = Encoder.stringToBytes('new data');
           const newWrite = await RecordsWrite.createFrom({
-            target                      : requester.did,
             unsignedRecordsWriteMessage : recordsWrite.message,
             data                        : newData,
-            signatureInput              : TestDataGenerator.createSignatureInputFromPersona(requester)
+            authorizationSignatureInput : Jws.createSignatureInput(requester)
           });
 
-          const newWriteReply = await handleRecordsWrite(newWrite.message, messageStore, didResolverStub);
+          const newWriteReply = await dwn.processMessage(tenant, newWrite.message, DataStream.fromBytes(newData));
 
           expect(newWriteReply.status.code).to.equal(202);
 
           // verify the new record state can be queried
-          const recordsQueryMessageData = await TestDataGenerator.generateRecordsQueryMessage({
+          const recordsQueryMessageData = await TestDataGenerator.generateRecordsQuery({
             requester,
-            target : requester,
-            filter : { recordId: message.recordId }
+            filter: { recordId: message.recordId }
           });
 
-          const recordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolverStub);
+          const recordsQueryReply = await dwn.processMessage(tenant, recordsQueryMessageData.message);
           expect(recordsQueryReply.status.code).to.equal(200);
           expect(recordsQueryReply.entries?.length).to.equal(1);
 
           const recordsWriteReturned = recordsQueryReply.entries![0] as RecordsWriteMessage;
-          expect(recordsWriteReturned.encodedData).to.equal(Encoder.bytesToBase64Url(newData));
+          expect((recordsWriteReturned as QueryResultEntry).encodedData).to.equal(Encoder.bytesToBase64Url(newData));
           expect(recordsWriteReturned.descriptor.published).to.equal(true);
           expect(recordsWriteReturned.descriptor.datePublished).to.equal(message.descriptor.datePublished);
         });
@@ -334,26 +383,29 @@ describe('handleRecordsWrite()', () => {
 
       it('should fail with 400 if modifying a record but its initial write cannot be found in DB', async () => {
         const recordId = await TestDataGenerator.randomCborSha256Cid();
-        const { message, requester } = await TestDataGenerator.generateRecordsWriteMessage({
+        const { message, requester, dataStream } = await TestDataGenerator.generateRecordsWrite({
           recordId,
           data: Encoder.stringToBytes('anything') // simulating modification of a message
         });
+        const tenant = requester.did;
 
-        const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
-        const reply = await handleRecordsWrite(message, messageStore, didResolverStub);
+        TestStubGenerator.stubDidResolver(didResolver, [requester]);
+        const reply = await dwn.processMessage(tenant, message, dataStream);
 
         expect(reply.status.code).to.equal(400);
         expect(reply.status.detail).to.contain('initial write is not found');
       });
 
       it('should return 400 if `dateCreated` and `dateModified` are not the same in an initial write', async () => {
-        const { requester, message } = await TestDataGenerator.generateRecordsWriteMessage({
+        const { requester, message, dataStream } = await TestDataGenerator.generateRecordsWrite({
           dateCreated  : '2023-01-10T10:20:30.405060',
           dateModified : getCurrentTimeInHighPrecision() // this always generate a different timestamp
         });
+        const tenant = requester.did;
 
-        const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
-        const reply = await handleRecordsWrite(message, messageStore, didResolverStub);
+        TestStubGenerator.stubDidResolver(didResolver, [requester]);
+
+        const reply = await dwn.processMessage(tenant, message, dataStream);
 
         expect(reply.status.code).to.equal(400);
         expect(reply.status.detail).to.contain('must match dateCreated');
@@ -361,14 +413,13 @@ describe('handleRecordsWrite()', () => {
 
       it('should return 400 if `contextId` in an initial protocol-base write mismatches with the expected deterministic `contextId`', async () => {
         // generate a message with protocol so that computed contextId is also computed and included in message
-        const { message } = await TestDataGenerator.generateRecordsWriteMessage({ protocol: 'anyValue' });
+        const { message, dataStream, requester } = await TestDataGenerator.generateRecordsWrite({ protocol: 'anyValue' });
 
         message.contextId = await TestDataGenerator.randomCborSha256Cid(); // make contextId mismatch from computed value
 
-        const didResolverStub = sinon.createStubInstance(DidResolver);
-        const messageStoreStub = sinon.createStubInstance(MessageStoreLevel);
+        TestStubGenerator.stubDidResolver(didResolver, [requester]);
 
-        const reply = await handleRecordsWrite(message, messageStoreStub, didResolverStub);
+        const reply = await dwn.processMessage('unused-tenant-DID', message, dataStream);
         expect(reply.status.code).to.equal(400);
         expect(reply.status.detail).to.contain('does not match deterministic contextId');
       });
@@ -399,48 +450,43 @@ describe('handleRecordsWrite()', () => {
           }
         };
         const alice = await TestDataGenerator.generatePersona();
+        const bob = await TestDataGenerator.generatePersona();
 
-        const protocolsConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          requester : alice,
-          target    : alice,
+        const protocolsConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
 
-        // setting up a stub did resolver
-        const aliceDidResolverStub = TestStubGenerator.createDidResolverStub(alice);
+        // setting up a stub DID resolver
+        TestStubGenerator.stubDidResolver(didResolver, [alice, bob]);
 
-        const protocolWriteReply = await handleProtocolsConfigure(protocolsConfigureMessageData.message, messageStore, aliceDidResolverStub);
-        expect(protocolWriteReply.status.code).to.equal(202);
+        const protocolsConfigureReply = await dwn.processMessage(alice.did, protocolsConfig.message, protocolsConfig.dataStream);
+        expect(protocolsConfigureReply.status.code).to.equal(202);
 
         // generate a `RecordsWrite` message from bob allowed by anyone
-        const bob = await TestDataGenerator.generatePersona();
         const bobData = new TextEncoder().encode('data from bob');
-        const emailMessageDataFromBob = await TestDataGenerator.generateRecordsWriteMessage(
+        const emailFromBob = await TestDataGenerator.generateRecordsWrite(
           {
             requester : bob,
-            target    : alice,
             protocol,
             schema    : 'email',
             data      : bobData
           }
         );
 
-        const bobDidResolverStub = TestStubGenerator.createDidResolverStub(bob);
-
-        const bobWriteReply = await handleRecordsWrite(emailMessageDataFromBob.message, messageStore, bobDidResolverStub);
+        const bobWriteReply = await dwn.processMessage(alice.did, emailFromBob.message, emailFromBob.dataStream);
         expect(bobWriteReply.status.code).to.equal(202);
 
         // verify bob's message got written to the DB
-        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQueryMessage({
+        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQuery({
           requester : alice,
-          target    : alice,
-          filter    : { recordId: emailMessageDataFromBob.message.recordId }
+          filter    : { recordId: emailFromBob.message.recordId }
         });
-        const bobRecordQueryReply = await handleRecordsQuery(messageDataForQueryingBobsWrite.message, messageStore, aliceDidResolverStub);
+        const bobRecordQueryReply = await dwn.processMessage(alice.did, messageDataForQueryingBobsWrite.message);
         expect(bobRecordQueryReply.status.code).to.equal(200);
         expect(bobRecordQueryReply.entries?.length).to.equal(1);
-        expect((bobRecordQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(base64url.baseEncode(bobData));
+        expect(bobRecordQueryReply.entries![0].encodedData).to.equal(base64url.baseEncode(bobData));
       });
 
       it('should allow write with recipient rule', async () => {
@@ -452,42 +498,39 @@ describe('handleRecordsWrite()', () => {
         const credentialResponseSchema = protocolDefinition.labels.credentialResponse.schema;
 
         const alice = await TestDataGenerator.generatePersona();
+        const vcIssuer = await TestDataGenerator.generatePersona();
 
-        const protocolsConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          requester : alice,
-          target    : alice,
+        const protocolsConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
 
-        // setting up a stub did resolver
-        const aliceDidResolverStub = TestStubGenerator.createDidResolverStub(alice);
+        // setting up a stub DID resolver
+        TestStubGenerator.stubDidResolver(didResolver, [alice, vcIssuer]);
 
-        const protocolWriteReply = await handleProtocolsConfigure(protocolsConfigureMessageData.message, messageStore, aliceDidResolverStub);
+        const protocolWriteReply = await dwn.processMessage(alice.did, protocolsConfig.message, protocolsConfig.dataStream);
         expect(protocolWriteReply.status.code).to.equal(202);
 
         // write a credential application to Alice's DWN to simulate that she has sent a credential application to a VC issuer
-        const vcIssuer = await TestDataGenerator.generatePersona();
         const encodedCredentialApplication = new TextEncoder().encode('credential application data');
-        const credentialApplicationMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const credentialApplication = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : vcIssuer.did,
           protocol,
           schema       : credentialApplicationSchema,
           data         : encodedCredentialApplication
         });
-        const credentialApplicationContextId = await credentialApplicationMessageData.recordsWrite.getEntryId();
+        const credentialApplicationContextId = await credentialApplication.recordsWrite.getEntryId();
 
-        const credentialApplicationReply = await handleRecordsWrite(credentialApplicationMessageData.message, messageStore, aliceDidResolverStub);
+        const credentialApplicationReply = await dwn.processMessage(alice.did, credentialApplication.message, credentialApplication.dataStream);
         expect(credentialApplicationReply.status.code).to.equal(202);
 
         // generate a credential application response message from VC issuer
         const encodedCredentialResponse = new TextEncoder().encode('credential response data');
-        const credentialResponseMessageData = await TestDataGenerator.generateRecordsWriteMessage(
+        const credentialResponse = await TestDataGenerator.generateRecordsWrite(
           {
             requester    : vcIssuer,
-            target       : alice,
             recipientDid : alice.did,
             protocol,
             contextId    : credentialApplicationContextId,
@@ -497,25 +540,18 @@ describe('handleRecordsWrite()', () => {
           }
         );
 
-        const vcIssuerDidResolverStub = TestStubGenerator.createDidResolverStub(vcIssuer);
-
-        const credentialResponseReply = await handleRecordsWrite(credentialResponseMessageData.message, messageStore, vcIssuerDidResolverStub);
+        const credentialResponseReply = await dwn.processMessage(alice.did, credentialResponse.message, credentialResponse.dataStream);
         expect(credentialResponseReply.status.code).to.equal(202);
 
         // verify VC issuer's message got written to the DB
-        const messageDataForQueryingCredentialResponse = await TestDataGenerator.generateRecordsQueryMessage({
+        const messageDataForQueryingCredentialResponse = await TestDataGenerator.generateRecordsQuery({
           requester : alice,
-          target    : alice,
-          filter    : { recordId: credentialResponseMessageData.message.recordId }
+          filter    : { recordId: credentialResponse.message.recordId }
         });
-        const applicationResponseQueryReply = await handleRecordsQuery(
-          messageDataForQueryingCredentialResponse.message,
-          messageStore,
-          aliceDidResolverStub
-        );
+        const applicationResponseQueryReply = await dwn.processMessage(alice.did, messageDataForQueryingCredentialResponse.message);
         expect(applicationResponseQueryReply.status.code).to.equal(200);
         expect(applicationResponseQueryReply.entries?.length).to.equal(1);
-        expect((applicationResponseQueryReply.entries![0] as RecordsWriteMessage).encodedData)
+        expect(applicationResponseQueryReply.entries![0].encodedData)
           .to.equal(base64url.baseEncode(encodedCredentialResponse));
       });
 
@@ -543,65 +579,60 @@ describe('handleRecordsWrite()', () => {
           }
         };
         const alice = await TestDataGenerator.generatePersona();
+        const bob = await TestDataGenerator.generatePersona();
 
-        const protocolsConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          requester : alice,
-          target    : alice,
+        const protocolsConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
 
-        // setting up a stub did resolver
-        const aliceDidResolverStub = TestStubGenerator.createDidResolverStub(alice);
+        // setting up a stub DID resolver
+        TestStubGenerator.stubDidResolver(didResolver, [alice, bob]);
 
-        const protocolWriteReply = await handleProtocolsConfigure(protocolsConfigureMessageData.message, messageStore, aliceDidResolverStub);
+        const protocolWriteReply = await dwn.processMessage(alice.did, protocolsConfig.message, protocolsConfig.dataStream);
         expect(protocolWriteReply.status.code).to.equal(202);
 
         // generate a `RecordsWrite` message from bob
-        const bob = await TestDataGenerator.generatePersona();
         const bobData = new TextEncoder().encode('data from bob');
-        const notesMessageDataFromBob = await TestDataGenerator.generateRecordsWriteMessage(
+        const notesFromBob = await TestDataGenerator.generateRecordsWrite(
           {
             requester : bob,
-            target    : alice,
             protocol,
             schema    : 'notes',
             data      : bobData
           }
         );
 
-        const bobDidResolverStub = TestStubGenerator.createDidResolverStub(bob);
-
-        const bobWriteReply = await handleRecordsWrite(notesMessageDataFromBob.message, messageStore, bobDidResolverStub);
+        const bobWriteReply = await dwn.processMessage(alice.did, notesFromBob.message, notesFromBob.dataStream);
         expect(bobWriteReply.status.code).to.equal(202);
 
         // verify bob's message got written to the DB
-        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQueryMessage({
+        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQuery({
           requester : alice,
-          target    : alice,
-          filter    : { recordId: notesMessageDataFromBob.message.recordId }
+          filter    : { recordId: notesFromBob.message.recordId }
         });
-        const bobRecordQueryReply = await handleRecordsQuery(messageDataForQueryingBobsWrite.message, messageStore, aliceDidResolverStub);
+        const bobRecordQueryReply = await dwn.processMessage(alice.did, messageDataForQueryingBobsWrite.message);
         expect(bobRecordQueryReply.status.code).to.equal(200);
         expect(bobRecordQueryReply.entries?.length).to.equal(1);
-        expect((bobRecordQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(base64url.baseEncode(bobData));
+        expect(bobRecordQueryReply.entries![0].encodedData).to.equal(base64url.baseEncode(bobData));
 
         // generate a new message from bob updating the existing notes
         const newNotesBytes = Encoder.stringToBytes('new data from bob');
-        const newNotesMessageFromBob = await TestDataGenerator.generateFromRecordsWrite({
+        const newNotesFromBob = await TestDataGenerator.generateFromRecordsWrite({
           requester     : bob,
-          existingWrite : notesMessageDataFromBob.recordsWrite,
+          existingWrite : notesFromBob.recordsWrite,
           data          : newNotesBytes
         });
 
-        const newWriteReply = await handleRecordsWrite(newNotesMessageFromBob.message, messageStore, bobDidResolverStub);
+        const newWriteReply = await dwn.processMessage(alice.did, newNotesFromBob.message, newNotesFromBob.dataStream);
         expect(newWriteReply.status.code).to.equal(202);
 
         // verify bob's message got written to the DB
-        const newRecordQueryReply = await handleRecordsQuery(messageDataForQueryingBobsWrite.message, messageStore, aliceDidResolverStub);
+        const newRecordQueryReply = await dwn.processMessage(alice.did, messageDataForQueryingBobsWrite.message);
         expect(newRecordQueryReply.status.code).to.equal(200);
         expect(newRecordQueryReply.entries?.length).to.equal(1);
-        expect((newRecordQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(Encoder.bytesToBase64Url(newNotesBytes));
+        expect(newRecordQueryReply.entries![0].encodedData).to.equal(Encoder.bytesToBase64Url(newNotesBytes));
       });
 
       it('should disallow overwriting existing records by a different author', async () => {
@@ -628,65 +659,58 @@ describe('handleRecordsWrite()', () => {
           }
         };
         const alice = await TestDataGenerator.generatePersona();
+        const bob = await TestDataGenerator.generatePersona();
+        const carol = await TestDataGenerator.generatePersona();
 
-        const protocolsConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          requester : alice,
-          target    : alice,
+        const protocolsConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
 
-        // setting up a stub did resolver
-        const aliceDidResolverStub = TestStubGenerator.createDidResolverStub(alice);
+        // setting up a stub DID resolver
+        TestStubGenerator.stubDidResolver(didResolver, [alice, bob, carol]);
 
-        const protocolWriteReply = await handleProtocolsConfigure(protocolsConfigureMessageData.message, messageStore, aliceDidResolverStub);
+        const protocolWriteReply = await dwn.processMessage(alice.did, protocolsConfig.message, protocolsConfig.dataStream);
         expect(protocolWriteReply.status.code).to.equal(202);
 
         // generate a `RecordsWrite` message from bob
-        const bob = await TestDataGenerator.generatePersona();
         const bobData = new TextEncoder().encode('data from bob');
-        const notesMessageDataFromBob = await TestDataGenerator.generateRecordsWriteMessage(
+        const notesFromBob = await TestDataGenerator.generateRecordsWrite(
           {
             requester : bob,
-            target    : alice,
             protocol,
             schema    : 'notes',
             data      : bobData
           }
         );
 
-        const bobDidResolverStub = TestStubGenerator.createDidResolverStub(bob);
-
-        const bobWriteReply = await handleRecordsWrite(notesMessageDataFromBob.message, messageStore, bobDidResolverStub);
+        const bobWriteReply = await dwn.processMessage(alice.did, notesFromBob.message, notesFromBob.dataStream);
         expect(bobWriteReply.status.code).to.equal(202);
 
         // verify bob's message got written to the DB
-        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQueryMessage({
+        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQuery({
           requester : alice,
-          target    : alice,
-          filter    : { recordId: notesMessageDataFromBob.message.recordId }
+          filter    : { recordId: notesFromBob.message.recordId }
         });
-        const bobRecordQueryReply = await handleRecordsQuery(messageDataForQueryingBobsWrite.message, messageStore, aliceDidResolverStub);
+        const bobRecordQueryReply = await dwn.processMessage(alice.did, messageDataForQueryingBobsWrite.message);
         expect(bobRecordQueryReply.status.code).to.equal(200);
         expect(bobRecordQueryReply.entries?.length).to.equal(1);
-        expect((bobRecordQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(base64url.baseEncode(bobData));
+        expect(bobRecordQueryReply.entries![0].encodedData).to.equal(base64url.baseEncode(bobData));
 
         // generate a new message from carol updating the existing notes, which should not be allowed/accepted
-        const carol = await TestDataGenerator.generatePersona();
         const newNotesData = new TextEncoder().encode('different data by carol');
-        const newNotesMessageDataFromBob = await TestDataGenerator.generateRecordsWriteMessage(
+        const newNotesFromBob = await TestDataGenerator.generateRecordsWrite(
           {
             requester : carol,
-            target    : alice,
             protocol,
             schema    : 'notes',
             data      : newNotesData,
-            recordId  : notesMessageDataFromBob.message.recordId,
+            recordId  : notesFromBob.message.recordId,
           }
         );
 
-        const carolDidResolverStub = TestStubGenerator.createDidResolverStub(carol);
-        const carolWriteReply = await handleRecordsWrite(newNotesMessageDataFromBob.message, messageStore, carolDidResolverStub);
+        const carolWriteReply = await dwn.processMessage(alice.did, newNotesFromBob.message, newNotesFromBob.dataStream);
         expect(carolWriteReply.status.code).to.equal(401);
         expect(carolWriteReply.status.detail).to.contain('must match to author of initial write');
       });
@@ -718,63 +742,58 @@ describe('handleRecordsWrite()', () => {
           }
         };
         const alice = await TestDataGenerator.generatePersona();
+        const bob = await TestDataGenerator.generatePersona();
 
-        const protocolsConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          requester : alice,
-          target    : alice,
+        const protocolsConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
 
-        // setting up a stub did resolver
-        const aliceDidResolverStub = TestStubGenerator.createDidResolverStub(alice);
+        // setting up a stub DID resolver
+        TestStubGenerator.stubDidResolver(didResolver, [alice, bob]);
 
-        const protocolWriteReply = await handleProtocolsConfigure(protocolsConfigureMessageData.message, messageStore, aliceDidResolverStub);
+        const protocolWriteReply = await dwn.processMessage(alice.did, protocolsConfig.message, protocolsConfig.dataStream);
         expect(protocolWriteReply.status.code).to.equal(202);
 
         // generate a `RecordsWrite` message from bob
-        const bob = await TestDataGenerator.generatePersona();
         const bobData = new TextEncoder().encode('data from bob');
-        const notesMessageDataFromBob = await TestDataGenerator.generateRecordsWriteMessage(
+        const notesFromBob = await TestDataGenerator.generateRecordsWrite(
           {
             requester : bob,
-            target    : alice,
             protocol,
             schema    : 'notes',
             data      : bobData
           }
         );
 
-        const bobDidResolverStub = TestStubGenerator.createDidResolverStub(bob);
-
-        const bobWriteReply = await handleRecordsWrite(notesMessageDataFromBob.message, messageStore, bobDidResolverStub);
+        const bobWriteReply = await dwn.processMessage(alice.did, notesFromBob.message, notesFromBob.dataStream);
         expect(bobWriteReply.status.code).to.equal(202);
 
         // verify bob's message got written to the DB
-        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQueryMessage({
+        const messageDataForQueryingBobsWrite = await TestDataGenerator.generateRecordsQuery({
           requester : alice,
-          target    : alice,
-          filter    : { recordId: notesMessageDataFromBob.message.recordId }
+          filter    : { recordId: notesFromBob.message.recordId }
         });
-        const bobRecordQueryReply = await handleRecordsQuery(messageDataForQueryingBobsWrite.message, messageStore, aliceDidResolverStub);
+        const bobRecordQueryReply = await dwn.processMessage(alice.did, messageDataForQueryingBobsWrite.message);
         expect(bobRecordQueryReply.status.code).to.equal(200);
         expect(bobRecordQueryReply.entries?.length).to.equal(1);
-        expect((bobRecordQueryReply.entries![0] as RecordsWriteMessage).encodedData).to.equal(base64url.baseEncode(bobData));
+        expect(bobRecordQueryReply.entries![0].encodedData).to.equal(base64url.baseEncode(bobData));
 
         // generate a new message from bob changing immutable recipientDid
-        const newNotesMessageDataFromBob = await TestDataGenerator.generateRecordsWriteMessage(
+        const newNotesFromBob = await TestDataGenerator.generateRecordsWrite(
           {
             requester    : bob,
-            target       : alice,
+            dateCreated  : notesFromBob.message.descriptor.dateCreated,
             protocol,
             schema       : 'notes',
             data         : bobData,
-            recordId     : notesMessageDataFromBob.message.recordId,
+            recordId     : notesFromBob.message.recordId,
             recipientDid : bob.did // this immutable property was Alice's DID initially
           }
         );
 
-        const newWriteReply = await handleRecordsWrite(newNotesMessageDataFromBob.message, messageStore, bobDidResolverStub);
+        const newWriteReply = await dwn.processMessage(alice.did, newNotesFromBob.message, newNotesFromBob.dataStream);
         expect(newWriteReply.status.code).to.equal(400);
         expect(newWriteReply.status.detail).to.contain('recipient is an immutable property');
       });
@@ -789,43 +808,40 @@ describe('handleRecordsWrite()', () => {
         const credentialResponseSchema = protocolDefinition.labels.credentialResponse.schema;
 
         const alice = await TestDataGenerator.generatePersona();
+        const fakeVcIssuer = await TestDataGenerator.generatePersona();
 
-        const protocolsConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          requester : alice,
-          target    : alice,
+        const protocolsConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
 
-        // setting up a stub did resolver
-        const aliceDidResolverStub = TestStubGenerator.createDidResolverStub(alice);
+        // setting up a stub DID resolver
+        TestStubGenerator.stubDidResolver(didResolver, [alice, fakeVcIssuer]);
 
-        const protocolWriteReply = await handleProtocolsConfigure(protocolsConfigureMessageData.message, messageStore, aliceDidResolverStub);
+        const protocolWriteReply = await dwn.processMessage(alice.did, protocolsConfig.message, protocolsConfig.dataStream);
         expect(protocolWriteReply.status.code).to.equal(202);
 
         // write a credential application to Alice's DWN to simulate that she has sent a credential application to a VC issuer
         const vcIssuer = await TestDataGenerator.generatePersona();
         const encodedCredentialApplication = new TextEncoder().encode('credential application data');
-        const credentialApplicationMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const credentialApplication = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : vcIssuer.did,
           protocol,
           schema       : credentialApplicationSchema,
           data         : encodedCredentialApplication
         });
-        const credentialApplicationContextId = await credentialApplicationMessageData.recordsWrite.getEntryId();
+        const credentialApplicationContextId = await credentialApplication.recordsWrite.getEntryId();
 
-        const credentialApplicationReply = await handleRecordsWrite(credentialApplicationMessageData.message, messageStore, aliceDidResolverStub);
+        const credentialApplicationReply = await dwn.processMessage(alice.did, credentialApplication.message, credentialApplication.dataStream);
         expect(credentialApplicationReply.status.code).to.equal(202);
 
         // generate a credential application response message from a fake VC issuer
-        const fakeVcIssuer = await TestDataGenerator.generatePersona();
         const encodedCredentialResponse = new TextEncoder().encode('credential response data');
-        const credentialResponseMessageData = await TestDataGenerator.generateRecordsWriteMessage(
+        const credentialResponse = await TestDataGenerator.generateRecordsWrite(
           {
             requester    : fakeVcIssuer,
-            target       : alice,
             recipientDid : alice.did,
             protocol,
             contextId    : credentialApplicationContextId,
@@ -835,9 +851,7 @@ describe('handleRecordsWrite()', () => {
           }
         );
 
-        const vcIssuerDidResolverStub = TestStubGenerator.createDidResolverStub(fakeVcIssuer);
-
-        const credentialResponseReply = await handleRecordsWrite(credentialResponseMessageData.message, messageStore, vcIssuerDidResolverStub);
+        const credentialResponseReply = await dwn.processMessage(alice.did, credentialResponse.message, credentialResponse.dataStream);
         expect(credentialResponseReply.status.code).to.equal(401);
         expect(credentialResponseReply.status.detail).to.contain('unexpected inbound message author');
       });
@@ -846,15 +860,14 @@ describe('handleRecordsWrite()', () => {
         const alice = await DidKeyResolver.generate();
         const protocol = 'nonExistentProtocol';
         const data = Encoder.stringToBytes('any data');
-        const credentialApplicationMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const credentialApplication = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : alice.did,
           protocol,
           data
         });
 
-        const reply = await handleRecordsWrite(credentialApplicationMessageData.message, messageStore, didResolver);
+        const reply = await dwn.processMessage(alice.did, credentialApplication.message, credentialApplication.dataStream);
         expect(reply.status.code).to.equal(401);
         expect(reply.status.detail).to.contain('unable to find protocol definition');
       });
@@ -863,27 +876,25 @@ describe('handleRecordsWrite()', () => {
         const alice = await DidKeyResolver.generate();
 
         const protocol = 'https://identity.foundation/decentralized-web-node/protocols/credential-issuance';
-        const protocolConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          target             : alice,
+        const protocolConfig = await TestDataGenerator.generateProtocolsConfigure({
           requester          : alice,
           protocol,
           protocolDefinition : credentialIssuanceProtocolDefinition
         });
 
-        const protocolConfigureReply = await handleProtocolsConfigure(protocolConfigureMessageData.message, messageStore, didResolver);
+        const protocolConfigureReply = await dwn.processMessage(alice.did, protocolConfig.message, protocolConfig.dataStream);
         expect(protocolConfigureReply.status.code).to.equal(202);
 
         const data = Encoder.stringToBytes('any data');
-        const credentialApplicationMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const credentialApplication = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : alice.did,
           protocol,
           schema       : 'unexpectedSchema',
           data
         });
 
-        const reply = await handleRecordsWrite(credentialApplicationMessageData.message, messageStore, didResolver);
+        const reply = await dwn.processMessage(alice.did, credentialApplication.message, credentialApplication.dataStream);
         expect(reply.status.code).to.equal(401);
         expect(reply.status.detail).to.equal('record with schema \'unexpectedSchema\' not allowed in protocol');
       });
@@ -893,28 +904,26 @@ describe('handleRecordsWrite()', () => {
 
         const protocol = 'https://identity.foundation/decentralized-web-node/protocols/credential-issuance';
         const protocolDefinition = credentialIssuanceProtocolDefinition;
-        const protocolConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          target    : alice,
-          requester : alice,
+        const protocolConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
         const credentialResponseSchema = protocolDefinition.labels.credentialResponse.schema;
 
-        const protocolConfigureReply = await handleProtocolsConfigure(protocolConfigureMessageData.message, messageStore, didResolver);
+        const protocolConfigureReply = await dwn.processMessage(alice.did, protocolConfig.message, protocolConfig.dataStream);
         expect(protocolConfigureReply.status.code).to.equal(202);
 
         const data = Encoder.stringToBytes('any data');
-        const credentialApplicationMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const credentialApplication = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : alice.did,
           protocol,
           schema       : credentialResponseSchema, // this is an known schema type, but not allowed for a protocol root record
           data
         });
 
-        const reply = await handleRecordsWrite(credentialApplicationMessageData.message, messageStore, didResolver);
+        const reply = await dwn.processMessage(alice.did, credentialApplication.message, credentialApplication.dataStream);
         expect(reply.status.code).to.equal(401);
         expect(reply.status.detail).to.contain('not allowed in structure level');
       });
@@ -934,42 +943,39 @@ describe('handleRecordsWrite()', () => {
             privateNote: {}
           }
         };
-        const protocolConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          target    : alice,
-          requester : alice,
+        const protocolConfig = await TestDataGenerator.generateProtocolsConfigure({
+          requester: alice,
           protocol,
           protocolDefinition
         });
 
-        const protocolConfigureReply = await handleProtocolsConfigure(protocolConfigureMessageData.message, messageStore, didResolver);
+        const protocolConfigureReply = await dwn.processMessage(alice.did, protocolConfig.message, protocolConfig.dataStream);
         expect(protocolConfigureReply.status.code).to.equal(202);
 
         // test that Alice is allowed to write to her own DWN
         const data = Encoder.stringToBytes('any data');
-        const aliceWriteMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const aliceWriteMessageData = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : alice.did,
           protocol,
           schema       : 'private-note',
           data
         });
 
-        let reply = await handleRecordsWrite(aliceWriteMessageData.message, messageStore, didResolver);
+        let reply = await dwn.processMessage(alice.did, aliceWriteMessageData.message, aliceWriteMessageData.dataStream);
         expect(reply.status.code).to.equal(202);
 
         // test that Bob is not allowed to write to Alice's DWN
         const bob = await DidKeyResolver.generate();
-        const bobWriteMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const bobWriteMessageData = await TestDataGenerator.generateRecordsWrite({
           requester    : bob,
-          target       : alice,
           recipientDid : alice.did,
           protocol,
           schema       : 'private-note',
           data
         });
 
-        reply = await handleRecordsWrite(bobWriteMessageData.message, messageStore, didResolver);
+        reply = await dwn.processMessage(alice.did, bobWriteMessageData.message, bobWriteMessageData.dataStream);
         expect(reply.status.code).to.equal(401);
         expect(reply.status.detail).to.contain('no allow rule defined for requester');
       });
@@ -985,21 +991,19 @@ describe('handleRecordsWrite()', () => {
 
         // write the VC issuance protocol
         const protocol = 'https://identity.foundation/decentralized-web-node/protocols/credential-issuance';
-        const protocolConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          target             : alice,
+        const protocolConfig = await TestDataGenerator.generateProtocolsConfigure({
           requester          : alice,
           protocol,
           protocolDefinition : invalidProtocolDefinition
         });
 
-        const protocolConfigureReply = await handleProtocolsConfigure(protocolConfigureMessageData.message, messageStore, didResolver);
+        const protocolConfigureReply = await dwn.processMessage(alice.did, protocolConfig.message, protocolConfig.dataStream);
         expect(protocolConfigureReply.status.code).to.equal(202);
 
         // simulate Alice's VC applications with both issuer
         const data = Encoder.stringToBytes('irrelevant');
-        const messageDataWithIssuerA = await TestDataGenerator.generateRecordsWriteMessage({
+        const messageDataWithIssuerA = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : issuer.did,
           schema       : credentialIssuanceProtocolDefinition.labels.credentialApplication.schema,
           protocol,
@@ -1007,13 +1011,12 @@ describe('handleRecordsWrite()', () => {
         });
         const contextId = await messageDataWithIssuerA.recordsWrite.getEntryId();
 
-        let reply = await handleRecordsWrite(messageDataWithIssuerA.message, messageStore, didResolver);
+        let reply = await dwn.processMessage(alice.did, messageDataWithIssuerA.message, messageDataWithIssuerA.dataStream);
         expect(reply.status.code).to.equal(202);
 
         // simulate issuer attempting to respond to Alice's VC application
-        const invalidResponseDataByIssuerA = await TestDataGenerator.generateRecordsWriteMessage({
+        const invalidResponseByIssuerA = await TestDataGenerator.generateRecordsWrite({
           requester    : issuer,
-          target       : alice,
           recipientDid : alice.did,
           schema       : credentialIssuanceProtocolDefinition.labels.credentialResponse.schema,
           contextId,
@@ -1022,7 +1025,7 @@ describe('handleRecordsWrite()', () => {
           data
         });
 
-        reply = await handleRecordsWrite(invalidResponseDataByIssuerA.message, messageStore, didResolver);
+        reply = await dwn.processMessage(alice.did, invalidResponseByIssuerA.message, invalidResponseByIssuerA.dataStream);
         expect(reply.status.code).to.equal(401);
         expect(reply.status.detail).to.contain('path to expected recipient is longer than actual length of ancestor message chain');
       });
@@ -1038,21 +1041,19 @@ describe('handleRecordsWrite()', () => {
 
         // write the VC issuance protocol
         const protocol = 'https://identity.foundation/decentralized-web-node/protocols/credential-issuance';
-        const protocolConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          target             : alice,
+        const protocolConfig = await TestDataGenerator.generateProtocolsConfigure({
           requester          : alice,
           protocol,
           protocolDefinition : invalidProtocolDefinition
         });
 
-        const protocolConfigureReply = await handleProtocolsConfigure(protocolConfigureMessageData.message, messageStore, didResolver);
+        const protocolConfigureReply = await dwn.processMessage(alice.did, protocolConfig.message, protocolConfig.dataStream);
         expect(protocolConfigureReply.status.code).to.equal(202);
 
         // simulate Alice's VC application to an issuer
         const data = Encoder.stringToBytes('irrelevant');
-        const messageDataWithIssuerA = await TestDataGenerator.generateRecordsWriteMessage({
+        const messageDataWithIssuerA = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : alice,
           recipientDid : issuer.did,
           schema       : credentialIssuanceProtocolDefinition.labels.credentialApplication.schema,
           protocol,
@@ -1060,13 +1061,12 @@ describe('handleRecordsWrite()', () => {
         });
         const contextId = await messageDataWithIssuerA.recordsWrite.getEntryId();
 
-        let reply = await handleRecordsWrite(messageDataWithIssuerA.message, messageStore, didResolver);
+        let reply = await dwn.processMessage(alice.did, messageDataWithIssuerA.message, messageDataWithIssuerA.dataStream);
         expect(reply.status.code).to.equal(202);
 
         // simulate issuer attempting to respond to Alice's VC application
-        const invalidResponseDataByIssuerA = await TestDataGenerator.generateRecordsWriteMessage({
+        const invalidResponseByIssuerA = await TestDataGenerator.generateRecordsWrite({
           requester    : issuer,
-          target       : alice,
           recipientDid : alice.did,
           schema       : credentialIssuanceProtocolDefinition.labels.credentialResponse.schema,
           contextId,
@@ -1075,7 +1075,7 @@ describe('handleRecordsWrite()', () => {
           data
         });
 
-        reply = await handleRecordsWrite(invalidResponseDataByIssuerA.message, messageStore, didResolver);
+        reply = await dwn.processMessage(alice.did, invalidResponseByIssuerA.message, invalidResponseByIssuerA.dataStream);
         expect(reply.status.code).to.equal(401);
         expect(reply.status.detail).to.contain('mismatching record schema');
       });
@@ -1092,21 +1092,19 @@ describe('handleRecordsWrite()', () => {
         const protocolDefinition: ProtocolDefinition = dexProtocolDefinition;
 
         // write the DEX protocol in the PFI
-        const protocolConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          target             : pfi,
+        const protocolConfig = await TestDataGenerator.generateProtocolsConfigure({
           requester          : pfi,
           protocol,
           protocolDefinition : protocolDefinition
         });
 
-        const protocolConfigureReply = await handleProtocolsConfigure(protocolConfigureMessageData.message, messageStore, didResolver);
+        const protocolConfigureReply = await dwn.processMessage(pfi.did, protocolConfig.message, protocolConfig.dataStream);
         expect(protocolConfigureReply.status.code).to.equal(202);
 
         // simulate Alice's ask and PFI's offer already occurred
         const data = Encoder.stringToBytes('irrelevant');
-        const askMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const askMessageData = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : pfi,
           recipientDid : pfi.did,
           schema       : 'ask',
           protocol,
@@ -1114,12 +1112,11 @@ describe('handleRecordsWrite()', () => {
         });
         const contextId = await askMessageData.recordsWrite.getEntryId();
 
-        let reply = await handleRecordsWrite(askMessageData.message, messageStore, didResolver);
+        let reply = await dwn.processMessage(pfi.did, askMessageData.message, askMessageData.dataStream);
         expect(reply.status.code).to.equal(202);
 
-        const offerMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const offerMessageData = await TestDataGenerator.generateRecordsWrite({
           requester    : pfi,
-          target       : pfi,
           recipientDid : alice.did,
           schema       : 'offer',
           contextId,
@@ -1128,13 +1125,12 @@ describe('handleRecordsWrite()', () => {
           data
         });
 
-        reply = await handleRecordsWrite(offerMessageData.message, messageStore, didResolver);
+        reply = await dwn.processMessage(pfi.did, offerMessageData.message, offerMessageData.dataStream);
         expect(reply.status.code).to.equal(202);
 
         // the actual test: making sure fulfillment message is accepted
-        const fulfillmentMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const fulfillmentMessageData = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : pfi,
           recipientDid : pfi.did,
           schema       : 'fulfillment',
           contextId,
@@ -1142,18 +1138,18 @@ describe('handleRecordsWrite()', () => {
           protocol,
           data
         });
-        reply = await handleRecordsWrite(fulfillmentMessageData.message, messageStore, didResolver);
+        reply = await dwn.processMessage(pfi.did, fulfillmentMessageData.message, fulfillmentMessageData.dataStream);
         expect(reply.status.code).to.equal(202);
 
         // verify the fulfillment message is stored
-        const recordsQueryMessageData = await TestDataGenerator.generateRecordsQueryMessage({
+        const recordsQueryMessageData = await TestDataGenerator.generateRecordsQuery({
           requester : pfi,
-          target    : pfi,
           filter    : { recordId: fulfillmentMessageData.message.recordId }
         });
 
         // verify the data is written
-        const recordsQueryReply = await handleRecordsQuery(recordsQueryMessageData.message, messageStore, didResolver);
+        const recordsQueryReply = await dwn.processMessage(
+          pfi.did, recordsQueryMessageData.message);
         expect(recordsQueryReply.status.code).to.equal(200);
         expect(recordsQueryReply.entries?.length).to.equal(1);
         expect((recordsQueryReply.entries![0] as RecordsWriteMessage).descriptor.dataCid)
@@ -1173,21 +1169,19 @@ describe('handleRecordsWrite()', () => {
         const protocolDefinition: ProtocolDefinition = dexProtocolDefinition;
 
         // write the DEX protocol in the PFI
-        const protocolConfigureMessageData = await TestDataGenerator.generateProtocolsConfigureMessage({
-          target             : pfi,
+        const protocolConfig = await TestDataGenerator.generateProtocolsConfigure({
           requester          : pfi,
           protocol,
           protocolDefinition : protocolDefinition
         });
 
-        const protocolConfigureReply = await handleProtocolsConfigure(protocolConfigureMessageData.message, messageStore, didResolver);
+        const protocolConfigureReply = await dwn.processMessage(pfi.did, protocolConfig.message, protocolConfig.dataStream);
         expect(protocolConfigureReply.status.code).to.equal(202);
 
         // simulate Alice's ask
         const data = Encoder.stringToBytes('irrelevant');
-        const askMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const askMessageData = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : pfi,
           recipientDid : pfi.did,
           schema       : 'ask',
           protocol,
@@ -1195,13 +1189,12 @@ describe('handleRecordsWrite()', () => {
         });
         const contextId = await askMessageData.recordsWrite.getEntryId();
 
-        let reply = await handleRecordsWrite(askMessageData.message, messageStore, didResolver);
+        let reply = await dwn.processMessage(pfi.did, askMessageData.message, askMessageData.dataStream);
         expect(reply.status.code).to.equal(202);
 
         // the actual test: making sure fulfillment message fails
-        const fulfillmentMessageData = await TestDataGenerator.generateRecordsWriteMessage({
+        const fulfillmentMessageData = await TestDataGenerator.generateRecordsWrite({
           requester    : alice,
-          target       : pfi,
           recipientDid : pfi.did,
           schema       : 'fulfillment',
           contextId,
@@ -1209,92 +1202,190 @@ describe('handleRecordsWrite()', () => {
           protocol,
           data
         });
-        reply = await handleRecordsWrite(fulfillmentMessageData.message, messageStore, didResolver);
+        reply = await dwn.processMessage(pfi.did, fulfillmentMessageData.message, fulfillmentMessageData.dataStream);
         expect(reply.status.code).to.equal(401);
         expect(reply.status.detail).to.contain('no parent found');
       });
     });
   });
 
-  it('should return 400 if `recordId` in `authorization` payload mismatches with `recordId` in the message', async () => {
-    const { requester, message, recordsWrite } = await TestDataGenerator.generateRecordsWriteMessage();
+  describe('authorization validation tests', () => {
+    it('should return 400 if `recordId` in `authorization` payload mismatches with `recordId` in the message', async () => {
+      const { requester, message, recordsWrite, dataStream } = await TestDataGenerator.generateRecordsWrite();
 
-    // replace `authorization` with mismatching `record`, even though signature is still valid
-    const authorizationPayload = { ...recordsWrite.authorizationPayload };
-    authorizationPayload.recordId = await TestDataGenerator.randomCborSha256Cid(); // make recordId mismatch in authorization payload
-    const authorizationPayloadBytes = Encoder.objectToBytes(authorizationPayload);
-    const signatureInput = TestDataGenerator.createSignatureInputFromPersona(requester);
-    const signer = await GeneralJwsSigner.create(authorizationPayloadBytes, [signatureInput]);
-    message.authorization = signer.getJws();
+      // replace `authorization` with mismatching `record`, even though signature is still valid
+      const authorizationPayload = { ...recordsWrite.authorizationPayload };
+      authorizationPayload.recordId = await TestDataGenerator.randomCborSha256Cid(); // make recordId mismatch in authorization payload
+      const authorizationPayloadBytes = Encoder.objectToBytes(authorizationPayload);
+      const signatureInput = Jws.createSignatureInput(requester);
+      const signer = await GeneralJwsSigner.create(authorizationPayloadBytes, [signatureInput]);
+      message.authorization = signer.getJws();
 
-    const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
-    const messageStoreStub = sinon.createStubInstance(MessageStoreLevel);
-    const reply = await handleRecordsWrite(message, messageStoreStub, didResolverStub);
+      const tenant = requester.did;
+      const didResolver = TestStubGenerator.createDidResolverStub(requester);
+      const messageStore = sinon.createStubInstance(MessageStoreLevel);
+      const dataStore = sinon.createStubInstance(DataStoreLevel);
 
-    expect(reply.status.code).to.equal(400);
-    expect(reply.status.detail).to.contain('does not match recordId in authorization');
-  });
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+      const reply = await recordsWriteHandler.handle({ tenant, message, dataStream });
 
-  it('should return 400 if `contextId` in `authorization` payload mismatches with `contextId` in the message', async () => {
+      expect(reply.status.code).to.equal(400);
+      expect(reply.status.detail).to.contain('does not match recordId in authorization');
+    });
+
+    it('should return 400 if `contextId` in `authorization` payload mismatches with `contextId` in the message', async () => {
     // generate a message with protocol so that computed contextId is also computed and included in message
-    const { requester, message, recordsWrite } = await TestDataGenerator.generateRecordsWriteMessage({ protocol: 'anyValue' });
+      const { requester, message, recordsWrite, dataStream } = await TestDataGenerator.generateRecordsWrite({ protocol: 'anyValue' });
 
-    // replace `authorization` with mismatching `contextId`, even though signature is still valid
-    const authorizationPayload = { ...recordsWrite.authorizationPayload };
-    authorizationPayload.contextId = await TestDataGenerator.randomCborSha256Cid(); // make contextId mismatch in authorization payload
-    const authorizationPayloadBytes = Encoder.objectToBytes(authorizationPayload);
-    const signatureInput = TestDataGenerator.createSignatureInputFromPersona(requester);
-    const signer = await GeneralJwsSigner.create(authorizationPayloadBytes, [signatureInput]);
-    message.authorization = signer.getJws();
+      // replace `authorization` with mismatching `contextId`, even though signature is still valid
+      const authorizationPayload = { ...recordsWrite.authorizationPayload };
+      authorizationPayload.contextId = await TestDataGenerator.randomCborSha256Cid(); // make contextId mismatch in authorization payload
+      const authorizationPayloadBytes = Encoder.objectToBytes(authorizationPayload);
+      const signatureInput = Jws.createSignatureInput(requester);
+      const signer = await GeneralJwsSigner.create(authorizationPayloadBytes, [signatureInput]);
+      message.authorization = signer.getJws();
 
-    const didResolverStub = sinon.createStubInstance(DidResolver);
-    const messageStoreStub = sinon.createStubInstance(MessageStoreLevel);
-    const reply = await handleRecordsWrite(message, messageStoreStub, didResolverStub);
+      const tenant = requester.did;
+      const didResolver = sinon.createStubInstance(DidResolver);
+      const messageStore = sinon.createStubInstance(MessageStoreLevel);
+      const dataStore = sinon.createStubInstance(DataStoreLevel);
 
-    expect(reply.status.code).to.equal(400);
-    expect(reply.status.detail).to.contain('does not match contextId in authorization');
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+      const reply = await recordsWriteHandler.handle({ tenant, message, dataStream });
+
+      expect(reply.status.code).to.equal(400);
+      expect(reply.status.detail).to.contain('does not match contextId in authorization');
+    });
+
+    it('should return 401 if `authorization` signature check fails', async () => {
+      const { requester, message, dataStream } = await TestDataGenerator.generateRecordsWrite();
+      const tenant = requester.did;
+
+      // setting up a stub DID resolver & message store
+      // intentionally not supplying the public key so a different public key is generated to simulate invalid signature
+      const mismatchingPersona = await TestDataGenerator.generatePersona({ did: requester.did, keyId: requester.keyId });
+      const didResolver = TestStubGenerator.createDidResolverStub(mismatchingPersona);
+      const messageStore = sinon.createStubInstance(MessageStoreLevel);
+      const dataStore = sinon.createStubInstance(DataStoreLevel);
+
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+      const reply = await recordsWriteHandler.handle({ tenant, message, dataStream });
+
+      expect(reply.status.code).to.equal(401);
+    });
+
+    it('should return 401 if an unauthorized requester is attempting write', async () => {
+      const requester = await TestDataGenerator.generatePersona();
+      const { message, dataStream } = await TestDataGenerator.generateRecordsWrite({ requester });
+
+      // setting up a stub DID resolver & message store
+      const didResolver = TestStubGenerator.createDidResolverStub(requester);
+      const messageStore = sinon.createStubInstance(MessageStoreLevel);
+      const dataStore = sinon.createStubInstance(DataStoreLevel);
+
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+
+      const tenant = await (await TestDataGenerator.generatePersona()).did; // unauthorized tenant
+      const reply = await recordsWriteHandler.handle({ tenant, message, dataStream });
+
+      expect(reply.status.code).to.equal(401);
+    });
+
   });
 
-  it('should return 400 if actual CID of `data` mismatches with `dataCid` in descriptor', async () => {
-    const messageData = await TestDataGenerator.generateRecordsWriteMessage();
-    messageData.message.encodedData = base64url.baseEncode(TestDataGenerator.randomBytes(50));
+  describe('attestation validation tests', () => {
+    it('should fail with 400 if `attestation` payload contains properties other than `descriptorCid`', async () => {
+      const { requester, message, recordsWrite, dataStream } = await TestDataGenerator.generateRecordsWrite();
+      const tenant = requester.did;
+      const signatureInput = Jws.createSignatureInput(requester);
 
-    const didResolverStub = sinon.createStubInstance(DidResolver);
-    const messageStoreStub = sinon.createStubInstance(MessageStoreLevel);
+      // replace `attestation` with one that has an additional property, but go the extra mile of making sure signature is valid
+      const descriptorCid = recordsWrite.authorizationPayload.descriptorCid;
+      const attestationPayload = { descriptorCid, someAdditionalProperty: 'anyValue' }; // additional property is not allowed
+      const attestationPayloadBytes = Encoder.objectToBytes(attestationPayload);
+      const attestationSigner = await GeneralJwsSigner.create(attestationPayloadBytes, [signatureInput]);
+      message.attestation = attestationSigner.getJws();
 
-    const reply = await handleRecordsWrite(messageData.message, messageStoreStub, didResolverStub);
+      // recreate the `authorization` based on the new` attestationCid`
+      const authorizationPayload = { ...recordsWrite.authorizationPayload };
+      authorizationPayload.attestationCid = await computeCid(attestationPayload);
+      const authorizationPayloadBytes = Encoder.objectToBytes(authorizationPayload);
+      const authorizationSigner = await GeneralJwsSigner.create(authorizationPayloadBytes, [signatureInput]);
+      message.authorization = authorizationSigner.getJws();
 
-    expect(reply.status.code).to.equal(400);
-    expect(reply.status.detail).to.equal('actual CID of data and `dataCid` in descriptor mismatch');
+      const didResolver = TestStubGenerator.createDidResolverStub(requester);
+      const messageStore = sinon.createStubInstance(MessageStoreLevel);
+      const dataStore = sinon.createStubInstance(DataStoreLevel);
+
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+      const reply = await recordsWriteHandler.handle({ tenant, message, dataStream });
+
+      expect(reply.status.code).to.equal(400);
+      expect(reply.status.detail).to.contain(`Only 'descriptorCid' is allowed in attestation payload`);
+    });
+
+    it('should fail validation with 400 if more than 1 attester is given ', async () => {
+      const alice = await DidKeyResolver.generate();
+      const bob = await DidKeyResolver.generate();
+      const { message, dataStream } = await TestDataGenerator.generateRecordsWrite({ requester: alice, attesters: [alice, bob] });
+
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+      const writeReply = await recordsWriteHandler.handle({ tenant: alice.did, message, dataStream });
+
+      expect(writeReply.status.code).to.equal(400);
+      expect(writeReply.status.detail).to.contain('implementation only supports 1 attester');
+    });
+
+    it('should fail validation with 400 if the `attestation` does not include the correct `descriptorCid`', async () => {
+      const alice = await DidKeyResolver.generate();
+      const { message, dataStream } = await TestDataGenerator.generateRecordsWrite({ requester: alice, attesters: [alice] });
+
+      // create another write and use its `attestation` value instead, that `attestation` will point to an entirely different `descriptorCid`
+      const anotherWrite = await TestDataGenerator.generateRecordsWrite({ attesters: [alice] });
+      message.attestation = anotherWrite.message.attestation;
+
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+      const writeReply = await recordsWriteHandler.handle({ tenant: alice.did, message, dataStream });
+
+      expect(writeReply.status.code).to.equal(400);
+      expect(writeReply.status.detail).to.contain('does not match expected descriptorCid');
+    });
+
+    it('should fail validation with 400 if expected CID of `attestation` mismatches the `attestationCid` in `authorization`', async () => {
+      const alice = await DidKeyResolver.generate();
+      const { message, dataStream } = await TestDataGenerator.generateRecordsWrite({ requester: alice, attesters: [alice] });
+
+      // replace valid attestation (the one signed by `authorization` with another attestation to the same message (descriptorCid)
+      const bob = await DidKeyResolver.generate();
+      const descriptorCid = await computeCid(message.descriptor);
+      const attestationNotReferencedByAuthorization = await RecordsWrite['createAttestation'](descriptorCid, Jws.createSignatureInputs([bob]));
+      message.attestation = attestationNotReferencedByAuthorization;
+
+      const recordsWriteHandler = new RecordsWriteHandler(didResolver, messageStore, dataStore);
+      const writeReply = await recordsWriteHandler.handle({ tenant: alice.did, message, dataStream });
+
+      expect(writeReply.status.code).to.equal(400);
+      expect(writeReply.status.detail).to.contain('does not match attestationCid');
+    });
   });
 
-  it('should return 401 if signature check fails', async () => {
-    const { requester, message } = await TestDataGenerator.generateRecordsWriteMessage();
+  it('should throw if `storageController.put()` throws unknown error', async () => {
+    const { requester, message, dataStream } = await TestDataGenerator.generateRecordsWrite();
+    const tenant = requester.did;
 
-    // setting up a stub did resolver & message store
-    // intentionally not supplying the public key so a different public key is generated to simulate invalid signature
-    const mismatchingPersona = await TestDataGenerator.generatePersona({ did: requester.did, keyId: requester.keyId });
-    const didResolverStub = TestStubGenerator.createDidResolverStub(mismatchingPersona);
-
-    const messageStoreStub = sinon.createStubInstance(MessageStoreLevel);
-
-    const reply = await handleRecordsWrite(message, messageStoreStub, didResolverStub);
-
-    expect(reply.status.code).to.equal(401);
-  });
-
-  it('should return 401 if an authorized requester is attempting write', async () => {
-    const requester = await TestDataGenerator.generatePersona();
-    const target = await TestDataGenerator.generatePersona();
-    const { message } = await TestDataGenerator.generateRecordsWriteMessage({ requester, target });
-
-    // setting up a stub did resolver & message store
     const didResolverStub = TestStubGenerator.createDidResolverStub(requester);
+
     const messageStoreStub = sinon.createStubInstance(MessageStoreLevel);
+    messageStoreStub.query.resolves([]);
 
-    const reply = await handleRecordsWrite(message, messageStoreStub, didResolverStub);
+    // simulate throwing unexpected error
+    sinon.stub(StorageController, 'put').throws(new Error('an unknown error in messageStore.put()'));
 
-    expect(reply.status.code).to.equal(401);
+    const dataStoreStub = sinon.createStubInstance(DataStoreLevel);
+
+    const recordsWriteHandler = new RecordsWriteHandler(didResolverStub, messageStoreStub, dataStoreStub);
+
+    const handlerPromise = recordsWriteHandler.handle({ tenant, message, dataStream });
+    await expect(handlerPromise).to.be.rejectedWith('an unknown error in messageStore.put()');
   });
 });
-

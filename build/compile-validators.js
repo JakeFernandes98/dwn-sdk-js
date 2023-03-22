@@ -31,11 +31,13 @@ import ProtocolRuleSet from '../json-schemas/protocol-rule-set.json' assert { ty
 import ProtocolsConfigure from '../json-schemas/protocols/protocols-configure.json' assert { type: 'json' };
 import ProtocolsQuery from '../json-schemas/protocols/protocols-query.json' assert { type: 'json' };
 import PublicJwk from '../json-schemas/jwk/public-jwk.json' assert { type: 'json' };
+import RecordsDelete from '../json-schemas/records/records-delete.json' assert { type: 'json' };
 import RecordsQuery from '../json-schemas/records/records-query.json' assert { type: 'json' };
+import RecordsRead from '../json-schemas/records/records-read.json' assert { type: 'json' };
 import RecordsWrite from '../json-schemas/records/records-write.json' assert { type: 'json' };
-import Request from '../json-schemas/request.json' assert { type: 'json' };
 
 const schemas = {
+  RecordsDelete,
   RecordsQuery,
   RecordsWrite,
   Definitions,
@@ -51,8 +53,8 @@ const schemas = {
   ProtocolRuleSet,
   ProtocolsConfigure,
   ProtocolsQuery,
-  PublicJwk,
-  Request
+  RecordsRead,
+  PublicJwk
 };
 
 const ajv = new Ajv({ code: { source: true, esm: true } });

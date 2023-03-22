@@ -15,14 +15,21 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "interface",
         "method",
         "dateCreated",
         "filter"
       ],
       "properties": {
+        "interface": {
+          "enum": [
+            "Records"
+          ],
+          "type": "string"
+        },
         "method": {
           "enum": [
-            "RecordsQuery"
+            "Query"
           ],
           "type": "string"
         },
@@ -36,6 +43,9 @@
           "properties": {
             "protocol": {
               "type": "string"
+            },
+            "attester": {
+              "$ref": "https://identity.foundation/dwn/json-schemas/defs.json#/definitions/did"
             },
             "recipient": {
               "$ref": "https://identity.foundation/dwn/json-schemas/defs.json#/definitions/did"
@@ -54,6 +64,19 @@
             },
             "dataFormat": {
               "type": "string"
+            },
+            "dateCreated": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                }
+              }
             }
           }
         },

@@ -24,6 +24,7 @@ export const handleRecordsQuery: MethodHandler = async (
     });
   }
 
+
   let replies;
   try {
     await authenticate(message.authorization, didResolver);
@@ -76,6 +77,7 @@ export const handleRecordsQuery: MethodHandler = async (
     entries
   });
 };
+
 
 async function fetchGranted(recordsQuery, messageStore)
 : Promise<BaseMessage[]> {
