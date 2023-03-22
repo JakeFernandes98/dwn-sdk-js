@@ -6,6 +6,7 @@ import { getCurrentTimeInHighPrecision } from '../../../utils/time.js';
 import { Message } from '../../../core/message.js';
 import { v4 as uuidv4 } from 'uuid';
 import { validateAuthorizationIntegrity } from '../../../core/auth.js';
+import { removeUndefinedProperties } from '../../../utils/object.js';
 
 type PermissionsRequestOptions = AuthCreateOptions & {
   target: string;
@@ -47,6 +48,8 @@ export class PermissionsRequest extends Message {
       scope       : options.scope,
     };
 
+    removeUndefinedProperties(descriptor);
+    
     Message.validateJsonSchema({ descriptor, authorization: { } });
 
     const auth = await Message.signAsAuthorization(options.target, descriptor, options.signatureInput);

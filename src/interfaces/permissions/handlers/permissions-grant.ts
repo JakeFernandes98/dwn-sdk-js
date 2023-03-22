@@ -21,7 +21,7 @@ export const handlePermissionsGrant: MethodHandler = async (
 
   await canonicalAuth(permissionGrant, didResolver);
 
-  if (author !== permissionGrant.grantedTo) {
+  if (author !== permissionGrant.grantedBy) {
     throw new Error('grantee must be signer');
   }
 

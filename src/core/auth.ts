@@ -81,6 +81,7 @@ export async function validateAuthorizationIntegrity(
  * @throws {Error} if fails authentication
  */
 export async function authenticate(jws: GeneralJws, didResolver: DidResolver): Promise<void> {
+  // console.log("Starting AuthO")
   const verifier = new GeneralJwsVerifier(jws);
   await verifier.verify(didResolver);
 }
@@ -91,9 +92,12 @@ export async function authenticate(jws: GeneralJws, didResolver: DidResolver): P
  */
 export async function authorize(incomingMessage: Message): Promise<void> {
   // if author/requester is the same as the target DID, we can directly grant access
+  // console.log("Starting AuthZ")
   if (incomingMessage.author === incomingMessage.target) {
     return;
   } else {
+    console.log('author is ', incomingMessage.author)
+    console.log('target is ', incomingMessage.target)
     throw new Error('message failed authorization, permission grant check not yet implemented');
   }
 }

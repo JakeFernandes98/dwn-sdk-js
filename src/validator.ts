@@ -10,6 +10,8 @@ export function validateJsonSchema(schemaName: string, payload: any): void {
   // const validateFn = validator.getSchema(schemaName);
   const validateFn = precompiledValidators[schemaName];
 
+  // console.log("validating against ", validateFn )
+
   if (!validateFn) {
     throw new Error(`schema for ${schemaName} not found.`);
   }

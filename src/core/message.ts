@@ -10,6 +10,7 @@ import { lexicographicalCompare } from '../utils/string.js';
 import { RecordsWriteMessage } from '../interfaces/records/types.js';
 import { validateJsonSchema } from '../validator.js';
 
+
 export enum DwnMethodName {
   RecordsWrite = 'RecordsWrite',
   RecordsQuery = 'RecordsQuery',
@@ -84,7 +85,7 @@ export abstract class Message {
     // the < and > operators compare strings in lexicographical order
     const cidA = await Message.getCid(a);
     const cidB = await Message.getCid(b);
-    return lexicographicalCompare(cidA, cidB);
+    return lexicographicalCompare(cidA.toString(), cidB.toString());
   }
 
   /**
